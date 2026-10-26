@@ -8,3 +8,4 @@ Wave at me.
 Can you jump?
 Take a step to the left.
 Walk backwards a little.
+Step to your left.

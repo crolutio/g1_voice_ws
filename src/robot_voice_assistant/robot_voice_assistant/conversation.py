@@ -114,11 +114,12 @@ WALKING_EXAMPLES: tuple[ExampleTurn, ...] = (
     ExampleTurn("Now turn right.", "Turning right.", "none", "turn_right"),
     ExampleTurn("Keep walking.", "Alright, I'll keep walking until you tell me to stop.", "none", "keep_walking"),
     ExampleTurn("Stop!", "Okay, I've stopped.", "none", "stop"),
-    ExampleTurn("Can you jump?", "I'm sorry, I can't jump. I can walk, turn and step to the side, though.", "shrug"),
+    ExampleTurn("Can you jump?", "I'm sorry, I can't jump. I can walk forward and backward and turn, though.", "shrug"),
+    ExampleTurn("Walk backwards please.", "Okay, stepping back.", "none", "walk_backward"),
     ExampleTurn(
-        "Walk backwards please.",
-        "Sorry, I can't walk backwards yet. I can turn around and walk the other way, though.",
-        "none",
+        "Step to your left.",
+        "Sorry, I can't step sideways yet. I can turn left and walk that way, though.",
+        "shrug",
     ),
 )
 
@@ -145,8 +146,7 @@ OFFLINE_COMMAND_REPLIES: dict[str, str] = {
     "turn_left": "Turning left.",
     "turn_right": "Turning right.",
     "turn_around": "Turning around.",
-    "step_left": "Stepping left.",
-    "step_right": "Stepping right.",
+    "walk_backward": "Okay, stepping back.",
 }
 OFFLINE_GESTURE_REPLY = "Sure."
 
@@ -164,7 +164,7 @@ def build_system_prompt(
         body = (
             "- About yourself: you have a real humanoid body with legs, arms, a waist and a head on a neck, but no hands, "
             "and you can walk "
-            "on the flat floor of this simulation: forward, turning and small side steps. Walking backwards, jumping, running, climbing and picking things up are not possible. You cannot see, "
+            "on the flat floor of this simulation: forward, backward and turning. Stepping sideways, jumping, running, climbing and picking things up are not possible. You cannot see, "
             "browse the internet, or know live information such as news, weather or prices.\n\n"
         )
         movement = (

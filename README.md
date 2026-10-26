@@ -5,7 +5,7 @@ A simulated **Unitree R1 EDU** humanoid robot (26 degrees of freedom, no hands) 
 - **Listens** to your microphone and turns speech into text (Whisper large-v3-turbo, on the GPU).
 - **Thinks** of an answer with Groq's `llama-3.3-70b-versatile` (70 billion parameters, in the cloud), falling back to a local `llama3.1:8b` when Groq is unavailable.
 - **Speaks** the answer out loud (Qwen3-TTS).
-- **Moves**: gestures with its arms, waist and head while it talks, and walks, turns and steps sideways when asked.
+- **Moves**: gestures with its arms, waist and head while it talks, and walks forward and backward and turns when asked.
 - **Knows and remembers**: Qwen3-Embedding searches a folder of documents for each question, remembers earlier conversations, and recognises clear commands by meaning.
 
 Conversation, gestures and walking all work together in one mode, started from **two terminals**. It only answers when you address it with a **wake word**: "robot" or "R1".
@@ -41,7 +41,7 @@ There are two parts, one per terminal. They talk to each other over ROS 2 topics
 | `brain_node`   | Finds relevant knowledge and memories, asks Groq (or the local fallback) and gets back a reply, a gesture and a walking motion. |
 | `tts_node`     | Speaks the reply. While it speaks, the microphone is muted so the robot does not hear itself.                                   |
 | `gesture_node` | Turns the gesture name into smooth arm, waist and head movements, sent to the robot 50 times per second.                        |
-| `motion_node`  | Turns a walking motion ("walk forward", "turn left") into walking speeds and stops when the robot has arrived.                 |
+| `motion_node`  | Turns a walking motion ("walk forward", "turn left") into walking speeds and stops when the robot has arrived.                  |
 
 ```text
  microphone --> stt_node --/voice/transcript--> brain_node --/voice/reply--> tts_node --> speakers
@@ -82,22 +82,22 @@ There are two parts, one per terminal. They talk to each other over ROS 2 topics
 
 This workspace was set up and tested with:
 
-| Component          | Version or location                                                                                                    |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| Operating system   | Ubuntu 24.04 LTS                                                                                                       |
-| GPU                | NVIDIA RTX GPU (tested: RTX 4090 Laptop, 16 GB, driver 580)                                                            |
-| Power              | Laptop on its charger and in **Performance** power mode (the voice is too slow otherwise)                              |
-| ROS 2              | Jazzy, installed in `/opt/ros/jazzy`                                                                                   |
-| Isaac Sim          | 6.2.0, pip install in `~/isaacsim-env`                                                                                 |
-| Isaac Lab          | 3.0.0 in `~/IsaacLab`, installed into `~/isaacsim-env` (runs the walking policy)                                       |
-| Robot model        | `~/g1_voice_ws/robots/r1/`: Unitree's R1 URDF and meshes, converted to USD in `usd/`                                   |
+| Component          | Version or location                                                                                                     |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| Operating system   | Ubuntu 24.04 LTS                                                                                                        |
+| GPU                | NVIDIA RTX GPU (tested: RTX 4090 Laptop, 16 GB, driver 580)                                                             |
+| Power              | Laptop on its charger and in **Performance** power mode (the voice is too slow otherwise)                               |
+| ROS 2              | Jazzy, installed in `/opt/ros/jazzy`                                                                                    |
+| Isaac Sim          | 6.2.0, pip install in `~/isaacsim-env`                                                                                  |
+| Isaac Lab          | 3.0.0 in `~/IsaacLab`, installed into `~/isaacsim-env` (runs the walking policy)                                        |
+| Robot model        | `~/g1_voice_ws/robots/r1/`: Unitree's R1 URDF and meshes, converted to USD in `usd/`                                    |
 | Walking policy     | `~/g1_voice_ws/training/logs/rsl_rl/r1_walk_flat/` (see [Training the walking policy](#11-training-the-walking-policy)) |
-| Ollama             | `~/.local/ollama`, with the fallback model `llama3.1:8b`                                                               |
-| Groq               | An API key in the `GROQ_API_KEY` environment variable (optional)                                                       |
-| Python environment | `~/g1_voice_ws/.venv` (faster-whisper, qwen-tts, sentence-transformers, PyTorch, colcon)                               |
-| Models             | `~/g1_voice_ws/models/hf` (Whisper large-v3-turbo, Qwen3-TTS 0.6B, Qwen3-Embedding 0.6B)                              |
-| Audio tools        | `arecord` and `aplay` (package `alsa-utils`, installed by default on Ubuntu)                                          |
-| Internet           | For Groq, and when Isaac Sim starts                                                                                    |
+| Ollama             | `~/.local/ollama`, with the fallback model `llama3.1:8b`                                                                |
+| Groq               | An API key in the `GROQ_API_KEY` environment variable (optional)                                                        |
+| Python environment | `~/g1_voice_ws/.venv` (faster-whisper, qwen-tts, sentence-transformers, PyTorch, colcon)                                |
+| Models             | `~/g1_voice_ws/models/hf` (Whisper large-v3-turbo, Qwen3-TTS 0.6B, Qwen3-Embedding 0.6B)                                |
+| Audio tools        | `arecord` and `aplay` (package `alsa-utils`, installed by default on Ubuntu)                                            |
+| Internet           | For Groq, and when Isaac Sim starts                                                                                     |
 
 To check the basics:
 
@@ -253,7 +253,7 @@ The robot uses a general-purpose language model, so you can ask about almost any
 - **Today's date**: it is given the computer's date and time.
 - **Things that change**: it says what it last knew and that it may have changed.
 - **Live information** (weather, news, prices): it says it cannot check.
-- **About itself**: it knows it is a Unitree R1 with arms, a waist and a head but no hands, and that it can walk, turn and side-step but not walk backwards, jump or pick things up.
+- **About itself**: it knows it is a Unitree R1 with arms, a waist and a head but no hands, and that it can walk forward and backward and turn, but not step sideways, jump or pick things up.
 
 Answers are kept to at most four sentences, because they are spoken. Ask "tell me more" for details.
 
@@ -283,22 +283,46 @@ The simulation does not stop an arm from passing through the robot's own head or
 
 ### Walking motions
 
-| Motion         | What the robot does              |
-| -------------- | -------------------------------- |
-| `walk_forward` | Walks forward about 1 metre      |
-| `step_left`    | Steps 30 cm to the left          |
-| `step_right`   | Steps 30 cm to the right         |
-| `turn_left`    | Turns 90 degrees to the left     |
-| `turn_right`   | Turns 90 degrees to the right    |
-| `turn_around`  | Turns 180 degrees                |
-| `keep_walking` | Walks forward until told to stop |
-| `stop`         | Stops                            |
+| Motion          | What the robot does               |
+| --------------- | --------------------------------- |
+| `walk_forward`  | Walks forward about 1 metre       |
+| `walk_backward` | Walks backward about half a metre |
+| `turn_left`     | Turns 90 degrees to the left      |
+| `turn_right`    | Turns 90 degrees to the right     |
+| `turn_around`   | Turns 180 degrees                 |
+| `keep_walking`  | Walks forward until told to stop  |
+| `stop`          | Stops                             |
 
 `motion_node` executes a motion using the robot's odometry, so "walk forward" really stops after about one metre and "turn left" after 90 degrees. A motion that cannot finish (for example because the robot is stuck) gives up after a time limit. If no walking command arrives for half a second, the robot stops.
 
 ### How well it walks
 
-The final walking policy (iteration 1500) finished training on 26 October 2026; its walking, turning and side-step accuracy has not been measured yet. Until then, treat walking as untested.
+Measured with the final policy (iteration 1500) in terminal 1's scene, headless at 100% of real time. The robot did not fall in any test: the pelvis always stayed between 0.70 and 0.73 m (0.72 m when standing).
+
+Named motions, as used by the voice assistant:
+
+| Motion                      | Target      | Measured                                 |
+| --------------------------- | ----------- | ---------------------------------------- |
+| `walk_forward`              | 1.0 m       | 1.07 to 1.08 m, heading within 3 degrees |
+| `walk_backward`             | 0.5 m       | 0.40 m                                   |
+| `turn_left`                 | 90 degrees  | 83 degrees                               |
+| `turn_right`                | 90 degrees  | 84 degrees                               |
+| `turn_around`               | 180 degrees | 190 degrees                              |
+| `walk_forward` while waving | 1.0 m       | 1.07 m, steady                           |
+| `keep_walking`, then `stop` | until told  | walked 2.4 m, then stopped               |
+
+Speed commands on `/cmd_vel` (measured over 4 seconds once walking):
+
+| Command                            | Measured                                           |
+| ---------------------------------- | -------------------------------------------------- |
+| Forward 1.0 / 0.6 / 0.3 m/s        | 0.85 / 0.52 / 0.24 m/s                             |
+| Backward 0.3 m/s                   | 0.20 m/s                                           |
+| Turn left 0.8 / 0.4 rad/s          | 0.97 / 0.52 rad/s                                  |
+| Turn right 0.8 / 0.4 rad/s         | 0.88 / 0.29 rad/s                                  |
+| Forward 0.5 m/s and turn 0.5 rad/s | 0.45 m/s and 0.46 rad/s                            |
+| Sideways 0.25 m/s (left / right)   | 0.07 / 0.00 m/s: the policy does not walk sideways |
+
+The robot keeps moving for a moment after the command stops (about 0.3 m after walking at 0.5 m/s, 13 to 22 degrees after a turn), so `motion_node` stops early by the distance covered in 0.5 s (walking) or the angle turned in 0.33 s (turning). Side steps are not offered, because the policy does not walk sideways; asked to step sideways, the robot says it cannot yet and offers to turn instead.
 
 ### Commanding the robot directly
 
@@ -492,7 +516,7 @@ In `src/robot_voice_assistant/robot_voice_assistant/conversation.py`:
 | `qwen_model`  | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`          | Qwen3-TTS model                                                       |
 | `speaker`     | `ryan`                                          | English voices: `aiden`, `dylan`, `eric`, `ryan`                      |
 | `language`    | `english`                                       | Language of the replies                                               |
-| `instruct`    | `""`                                            | Speaking style, for example `"Speak in a warm, friendly tone."`        |
+| `instruct`    | `""`                                            | Speaking style, for example `"Speak in a warm, friendly tone."`       |
 | `voice_model` | `~/g1_voice_ws/models/en_US-lessac-medium.onnx` | Piper voice file (only with `tts_engine: piper`)                      |
 | `player`      | `aplay`                                         | Program that plays the audio                                          |
 
@@ -506,10 +530,10 @@ Replies are spoken sentence by sentence: the next sentence is generated while th
 
 ### Gestures and motions (`gesture_node`, `motion_node`)
 
-| Setting         | Default                | Meaning                                                 |
-| --------------- | ---------------------- | ------------------------------------------------------- |
-| `rate_hz`       | `50.0` / `20.0`        | How often joint targets (gestures) or speeds are sent   |
-| `command_topic` | `/robot/joint_command` | Topic the simulator listens on (`gesture_node` only)    |
+| Setting         | Default                | Meaning                                               |
+| --------------- | ---------------------- | ----------------------------------------------------- |
+| `rate_hz`       | `50.0` / `20.0`        | How often joint targets (gestures) or speeds are sent |
+| `command_topic` | `/robot/joint_command` | Topic the simulator listens on (`gesture_node` only)  |
 
 The gestures are defined in `robot_voice_assistant/gestures.py` and the motions in `robot_voice_assistant/motions.py`.
 
@@ -520,7 +544,7 @@ The walking policy was trained with Isaac Lab 3.0 on the task `R1-Walk-Flat`, de
 - the Unitree R1 from `robot_cfg.py` (converted from Unitree's URDF; motor limits from the URDF);
 - PhysX physics, like the scene in terminal 1;
 - the policy controls the 12 leg joints; the waist, arms and head are moved through the gesture poses during training, so the robot learns to keep its balance while it gestures;
-- forward, sideways and turning speed commands, and standing still.
+- forward, backward, sideways and turning speed commands, and standing still (the policy did not learn to walk sideways; see [How well it walks](#how-well-it-walks)).
 
 To train again (about an hour on the RTX 4090 Laptop GPU with 4096 robots in parallel and the GPU busy half of the time):
 
@@ -562,21 +586,21 @@ source ~/isaacsim-env/bin/activate && cd ~/IsaacLab && python scripts/tools/conv
 
 | Problem                                      | Fix                                                                                                                                                                            |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Long pauses before or while the robot speaks | The laptop is not in Performance power mode or is on battery. Switch to Performance, or set `tts_engine: piper`.                                                              |
-| The robot does not move                      | Terminal 1 must show `Walking.`; check `ros2 topic hz /clock`. `motion_node` needs `/robot/odom` from terminal 1.                                                             |
+| Long pauses before or while the robot speaks | The laptop is not in Performance power mode or is on battery. Switch to Performance, or set `tts_engine: piper`.                                                               |
+| The robot does not move                      | Terminal 1 must show `Walking.`; check `ros2 topic hz /clock`. `motion_node` needs `/robot/odom` from terminal 1.                                                              |
 | The robot does not react when I speak        | Say a wake word. Check `ros2 topic echo /voice/mic_level --field data` and lower `threshold_ratio` if your level stays below the threshold. Check the microphone is not muted. |
 | It reacts to other people in the room        | Keep the wake words on, and raise `threshold_ratio`.                                                                                                                           |
-| `GROQ_API_KEY is not set` in the log         | Set the key (see [Groq API key](#groq-api-key)) and start the assistant from a new terminal.                                                                                  |
-| `Groq unavailable (HTTPError: HTTP 401)`     | The key is wrong or expired. Create a new one in the Groq console and update `~/.bashrc`.                                                                                     |
-| `Groq unavailable (RateLimitedError ...)`    | Too many requests for your Groq plan. The local model answers until Groq accepts requests again.                                                                              |
-| `Could not reach Ollama`                     | Start it with `~/.local/ollama/bin/ollama serve`.                                                                                                                             |
-| `model "llama3.1:8b" not found`              | Download it: `~/.local/ollama/bin/ollama pull llama3.1:8b`.                                                                                                                   |
-| An answer is wrong or outdated               | Add the correct fact to `config/knowledge/`.                                                                                                                                  |
-| `Microphone stream ended`                    | `arecord` cannot open the device. Run `arecord -l` and set `mic_device`.                                                                                                      |
-| The full Isaac Sim window is extremely slow  | Use the default light viewer (`--viewer newton_gl`); the full window runs at about 4% of real time on this laptop.                                                            |
-| `No checkpoint found` in terminal 1          | Train the walking policy first (see [Training the walking policy](#11-training-the-walking-policy)).                                                                         |
-| `ros2: command not found`                    | Run `source /opt/ros/jazzy/setup.bash` first.                                                                                                                                 |
-| `Package 'robot_voice_assistant' not found`  | Build the workspace (see [Development](#13-development)) and `source ~/g1_voice_ws/install/setup.bash`.                                                                       |
+| `GROQ_API_KEY is not set` in the log         | Set the key (see [Groq API key](#groq-api-key)) and start the assistant from a new terminal.                                                                                   |
+| `Groq unavailable (HTTPError: HTTP 401)`     | The key is wrong or expired. Create a new one in the Groq console and update `~/.bashrc`.                                                                                      |
+| `Groq unavailable (RateLimitedError ...)`    | Too many requests for your Groq plan. The local model answers until Groq accepts requests again.                                                                               |
+| `Could not reach Ollama`                     | Start it with `~/.local/ollama/bin/ollama serve`.                                                                                                                              |
+| `model "llama3.1:8b" not found`              | Download it: `~/.local/ollama/bin/ollama pull llama3.1:8b`.                                                                                                                    |
+| An answer is wrong or outdated               | Add the correct fact to `config/knowledge/`.                                                                                                                                   |
+| `Microphone stream ended`                    | `arecord` cannot open the device. Run `arecord -l` and set `mic_device`.                                                                                                       |
+| The full Isaac Sim window is extremely slow  | Use the default light viewer (`--viewer newton_gl`); the full window runs at about 4% of real time on this laptop.                                                             |
+| `No checkpoint found` in terminal 1          | Train the walking policy first (see [Training the walking policy](#11-training-the-walking-policy)).                                                                           |
+| `ros2: command not found`                    | Run `source /opt/ros/jazzy/setup.bash` first.                                                                                                                                  |
+| `Package 'robot_voice_assistant' not found`  | Build the workspace (see [Development](#13-development)) and `source ~/g1_voice_ws/install/setup.bash`.                                                                        |
 
 Logs: Isaac Sim and Isaac Lab in `~/isaacsim-env/lib/python3.12/site-packages/isaacsim/kit/logs/Kit/`, the ROS 2 nodes in `~/.ros/log/`, Ollama (when started by the script) in `~/g1_voice_ws/log/ollama.log`.
 
@@ -659,7 +683,7 @@ cd ~/g1_voice_ws/src/robot_voice_assistant && ../../.venv/bin/python scripts/bui
 
 ### Limitations
 
-- The robot walks on flat ground only: forward, turning and side steps. It cannot see obstacles, run, jump or climb.
+- The robot walks on flat ground only: forward, backward and turning. It does not step sideways, cannot see obstacles, and cannot run, jump or climb.
 - The R1 has no hands and cannot pick things up. Gestures are hand-made movements of the arms, waist and head, carried out by the physics simulation through the joint motors.
 - The walking policy was trained in simulation only.
 - Neither language model can look things up; they know nothing after their training data ends.

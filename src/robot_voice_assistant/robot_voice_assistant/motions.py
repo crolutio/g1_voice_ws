@@ -31,11 +31,11 @@ class MotionSpec:
     continuous: bool = False  # keep going until another motion or "stop"
 
 
-# There is no "walk_backward": the trained walking policy does not walk backwards (it stands still instead).
+# There are no side steps: the trained R1 walking policy does not walk sideways (measured 0.00 to 0.07 m/s
+# for 0.25 m/s commanded), so "step left" or "step right" would not move the robot.
 MOTIONS: dict[str, MotionSpec] = {
     "walk_forward": MotionSpec(forward_m=1.0, speed=0.5),
-    "step_left": MotionSpec(sideways_m=0.3, speed=0.2),
-    "step_right": MotionSpec(sideways_m=-0.3, speed=0.2),
+    "walk_backward": MotionSpec(forward_m=-0.5, speed=0.3),
     "turn_left": MotionSpec(turn_deg=90.0, speed=0.8),
     "turn_right": MotionSpec(turn_deg=-90.0, speed=0.8),
     "turn_around": MotionSpec(turn_deg=180.0, speed=0.8),
@@ -46,14 +46,18 @@ MOTION_DESCRIPTIONS: dict[str, str] = {
     "none": "stay where you are",
     "stop": "stop walking",
     "walk_forward": "walk forward about one metre, e.g. 'come here' or 'walk forward'",
-    "step_left": "take a small step to the left",
-    "step_right": "take a small step to the right",
+    "walk_backward": "walk backward about half a metre",
     "turn_left": "turn 90 degrees to the left",
     "turn_right": "turn 90 degrees to the right",
     "turn_around": "turn around (180 degrees)",
     "keep_walking": "keep walking forward until told to stop",
 }
 
+# The robot keeps moving for a moment after the command stops; measured with the final R1 policy it
+# coasted about 0.3 m after walking at 0.5 m/s and 13 to 22 degrees after turning at 0.8 rad/s. The
+# controller stops early by the distance (or angle) covered in this time at the motion's speed.
+DEFAULT_WALK_COAST_S = 0.5
+DEFAULT_TURN_COAST_S = 0.33
 POSITION_TOLERANCE_M = 0.03
 ANGLE_TOLERANCE_RAD = math.radians(2.0)
 SLOWDOWN_DISTANCE_M = 0.25  # slow down over the last part of a walk
@@ -69,7 +73,13 @@ def _wrap_angle(angle: float) -> float:
 class MotionController:
     """Turns one named motion into velocity commands until the odometry says it is done."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        walk_coast_s: float = DEFAULT_WALK_COAST_S,
+        turn_coast_s: float = DEFAULT_TURN_COAST_S,
+    ) -> None:
+        self._walk_coast_s = walk_coast_s
+        self._turn_coast_s = turn_coast_s
         self._spec: MotionSpec | None = None
         self._start = Pose2D(0.0, 0.0, 0.0)
         self._deadline_s = 0.0
@@ -108,7 +118,7 @@ class MotionController:
             self._turned_rad += _wrap_angle(pose.yaw - self._last_yaw)
             self._last_yaw = pose.yaw
             remaining = math.radians(spec.turn_deg) - self._turned_rad
-            if abs(remaining) <= ANGLE_TOLERANCE_RAD:
+            if abs(remaining) <= ANGLE_TOLERANCE_RAD + spec.speed * self._turn_coast_s:
                 self._spec, self.name = None, NO_MOTION
                 return VelocityCommand()
             scale = max(MIN_SPEED_FRACTION, min(1.0, abs(remaining) / SLOWDOWN_ANGLE_RAD))
@@ -123,7 +133,7 @@ class MotionController:
         ahead = dx_world * cos_p + dy_world * sin_p
         left = -dx_world * sin_p + dy_world * cos_p
         distance = math.hypot(ahead, left)
-        if distance <= POSITION_TOLERANCE_M:
+        if distance <= POSITION_TOLERANCE_M + spec.speed * self._walk_coast_s:
             self._spec, self.name = None, NO_MOTION
             return VelocityCommand()
         speed = spec.speed * max(MIN_SPEED_FRACTION, min(1.0, distance / SLOWDOWN_DISTANCE_M))
@@ -140,6 +150,5 @@ MOTION_PHRASES: dict[str, list[str]] = {
     "turn_left": ["turn left", "turn to your left", "rotate left"],
     "turn_right": ["turn right", "turn to your right", "rotate right"],
     "turn_around": ["turn around", "face the other way", "turn back"],
-    "step_left": ["step to the left", "move a little to the left", "side step left"],
-    "step_right": ["step to the right", "move a little to the right", "side step right"],
+    "walk_backward": ["walk backwards", "step back", "move back a little", "back up"],
 }
