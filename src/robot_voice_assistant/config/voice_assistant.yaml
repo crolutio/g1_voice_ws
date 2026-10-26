@@ -1,0 +1,49 @@
+stt_node:
+  ros__parameters:
+    model_size: large-v3-turbo  # Whisper: large-v3-turbo (most accurate), small.en (faster, less GPU memory)
+    device: cuda
+    compute_type: float16
+    language: en
+    mic_device: default       # ALSA device for arecord, e.g. "default" or "plughw:1,6"
+    min_rms: 0.01             # lowest level that can count as speech
+    threshold_ratio: 2.5      # speech must be this many times louder than the noise floor (see /voice/mic_level)
+    unmute_delay_s: 0.5
+    # Only sentences containing a wake word are answered (nearby conversations are ignored).
+    # Use [""] to answer everything.
+    wake_words: ["robot", "r1", "r one", "are one"]
+    follow_up_s: 8.0          # after a reply, follow-up questions need no wake word for this long
+
+brain_node:
+  ros__parameters:
+    # Language model: Groq in the cloud (needs the GROQ_API_KEY environment variable), and a local
+    # Ollama model that answers when Groq is unavailable (no internet, no key, rate limit).
+    use_groq: true
+    groq_model: llama-3.3-70b-versatile
+    fallback_model: llama3.1:8b
+    ollama_url: http://localhost:11434
+    robot_name: R1
+    history_turns: 10         # how many earlier question/answer pairs it remembers word for word
+    # Qwen3-Embedding: knowledge base search, long-term memory and command matching.
+    use_embeddings: true
+    embedding_model: Qwen/Qwen3-Embedding-0.6B
+    embedding_device: cuda
+    knowledge_dir: ""         # "" = the package's config/knowledge folder; every .md/.txt file in it is searched
+    knowledge_min_score: 0.40
+    use_memory: true          # remember earlier conversations (stored in memory_file)
+    memory_file: ~/.local/share/robot_voice_assistant/memory.jsonl
+    memory_min_score: 0.40
+    command_match_threshold: 0.68  # higher = only very clear commands are recognised without the language model
+
+tts_node:
+  ros__parameters:
+    tts_engine: qwen3         # qwen3 (Qwen3-TTS, natural voice) or piper (very fast, more robotic)
+    qwen_model: Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+    speaker: ryan             # aiden, dylan, eric, ryan (English); ono_anna, serena, sohee, uncle_fu, vivian
+    language: english
+    instruct: ""              # style instruction, e.g. "Speak in a warm, friendly tone."
+    player: aplay
+
+gesture_node:
+  ros__parameters:
+    rate_hz: 50.0
+    command_topic: /robot/joint_command

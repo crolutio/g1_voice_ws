@@ -1,0 +1,366 @@
+"""Conversation logic for the robot's brain, independent of ROS so it can be tested and used from a terminal."""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import datetime
+from typing import Protocol
+
+from robot_voice_assistant.arithmetic import find_arithmetic, spoken_calculation
+from robot_voice_assistant.assistant_response import NO_GESTURE, NO_MOTION, AssistantResponse, parse_assistant_response
+from robot_voice_assistant.llm_backends import ChatBackend
+from robot_voice_assistant.ollama_client import ChatMessage, build_response_schema
+
+# Small models sometimes close the JSON string right before "'t" ("I don", "it isn").
+_TRUNCATED_CONTRACTION = re.compile(
+    r"\b(don|doesn|didn|can|couldn|won|wouldn|shouldn|isn|aren|wasn|weren|haven|hasn|hadn|ain)$",
+    re.IGNORECASE,
+)
+
+
+def quote_user(text: str) -> str:
+    """Mark the person's words; Mistral's template puts the system prompt right before the last user turn."""
+    return f'The person says: "{text}"'
+
+
+MAX_SPOKEN_SENTENCES = 4
+# A sentence ends at . ! or ? followed by a space and a capital letter, digit or quote ("8,848.86 m" stays whole).
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])")
+
+
+def split_sentences(text: str) -> list[str]:
+    return [sentence.strip() for sentence in _SENTENCE_END.split(text.strip()) if sentence.strip()]
+
+
+def looks_truncated(reply: str) -> bool:
+    return bool(_TRUNCATED_CONTRACTION.search(reply.strip()))
+
+
+@dataclass(frozen=True)
+class ExampleTurn:
+    """A sample exchange shown to the model before the real conversation, to teach length, tone and gestures."""
+
+    user: str
+    reply: str
+    gesture: str
+    motion: str = NO_MOTION
+
+    def as_messages(self, with_motion: bool = False) -> list[ChatMessage]:
+        answer = _answer_json(AssistantResponse(self.reply, self.gesture, self.motion), with_motion)
+        return [{"role": "user", "content": quote_user(self.user)}, {"role": "assistant", "content": answer}]
+
+
+def _answer_json(response: AssistantResponse, with_motion: bool) -> str:
+    fields = {"reply": response.reply, "gesture": response.gesture}
+    if with_motion:
+        fields["motion"] = response.motion
+    return json.dumps(fields)
+
+
+DEFAULT_EXAMPLES: tuple[ExampleTurn, ...] = (
+    ExampleTurn("Hi there!", "Hello! It's nice to meet you. What would you like to talk about?", "wave_right"),
+    ExampleTurn(
+        "What is the capital of Japan?",
+        "The capital of Japan is Tokyo. It is one of the largest cities in the world.",
+        "nod",
+    ),
+    ExampleTurn("And what's 12 times 12?", "12 times 12 is 144.", "nod"),
+    ExampleTurn(
+        "Tell me about the Eiffel Tower.",
+        "The Eiffel Tower is a wrought iron tower in Paris, built in 1889 for the World's Fair. "
+        "It is about 330 metres tall and is one of the most visited monuments in the world.",
+        "think",
+    ),
+    ExampleTurn(
+        "Who won the last football World Cup?",
+        "As far as I know, Argentina won the 2022 World Cup, beating France in the final. "
+        "There may have been a newer tournament since my knowledge was last updated.",
+        "think",
+    ),
+    ExampleTurn(
+        "What's the weather like today?",
+        "I'm sorry, I can't check live information like the weather. A weather app will have the latest forecast.",
+        "shrug",
+    ),
+    ExampleTurn(
+        "Any tips for sleeping better?",
+        "Try to go to bed at the same time every night and keep your room dark and cool. "
+        "It also helps to put your phone away for an hour before you sleep.",
+        "think",
+    ),
+    ExampleTurn(
+        "Can you come over here?",
+        "I'm sorry, I can't walk yet. My body is held in place in this simulation, "
+        "but I can wave, bow, point and do a few other gestures.",
+        "none",
+    ),
+    ExampleTurn(
+        "Purple running seven the table.",
+        "Sorry, I didn't quite catch that. Could you say it again?",
+        "shrug",
+    ),
+    ExampleTurn("Okay, thanks a lot. Bye!", "You're welcome! It was lovely talking with you. Goodbye!", "wave_right"),
+)
+
+# With the walking policy: the same examples, but the robot walks when asked and stays put otherwise.
+WALKING_EXAMPLES: tuple[ExampleTurn, ...] = (
+    *(example for example in DEFAULT_EXAMPLES if example.user != "Can you come over here?"),
+    ExampleTurn("Can you come over here?", "Sure, I'm coming over to you now.", "none", "walk_forward"),
+    ExampleTurn("Turn to your left, please.", "Okay, turning to my left.", "none", "turn_left"),
+    ExampleTurn("Walk over to me.", "On my way!", "wave_right", "walk_forward"),
+    ExampleTurn("Now turn right.", "Turning right.", "none", "turn_right"),
+    ExampleTurn("Keep walking.", "Alright, I'll keep walking until you tell me to stop.", "none", "keep_walking"),
+    ExampleTurn("Stop!", "Okay, I've stopped.", "none", "stop"),
+    ExampleTurn("Can you jump?", "I'm sorry, I can't jump. I can walk, turn and step to the side, though.", "shrug"),
+    ExampleTurn(
+        "Walk backwards please.",
+        "Sorry, I can't walk backwards yet. I can turn around and walk the other way, though.",
+        "none",
+    ),
+)
+
+
+class ContextRetriever(Protocol):
+    """Finds knowledge and memories relevant to a question, and remembers finished exchanges."""
+
+    def context_for(self, question: str) -> str: ...
+
+    def remember(self, user: str, reply: str) -> None: ...
+
+    def forget(self) -> None: ...
+
+
+class CommandMatcherLike(Protocol):
+    def match(self, text: str, allowed: Sequence[str] | None = None) -> str | None: ...
+
+
+# What the robot says when no language model answers but the command is clear.
+OFFLINE_COMMAND_REPLIES: dict[str, str] = {
+    "walk_forward": "Okay, I'm coming.",
+    "keep_walking": "Okay, walking.",
+    "stop": "Okay, stopping.",
+    "turn_left": "Turning left.",
+    "turn_right": "Turning right.",
+    "turn_around": "Turning around.",
+    "step_left": "Stepping left.",
+    "step_right": "Stepping right.",
+}
+OFFLINE_GESTURE_REPLY = "Sure."
+
+
+def build_system_prompt(
+    robot_name: str,
+    gesture_descriptions: Mapping[str, str],
+    background_knowledge: str,
+    now: datetime,
+    motion_descriptions: Mapping[str, str] | None = None,
+) -> str:
+    gesture_lines = "\n".join(f"- {name}: {description}" for name, description in gesture_descriptions.items())
+    if motion_descriptions:
+        motion_lines = "\n".join(f"- {name}: {description}" for name, description in motion_descriptions.items())
+        body = (
+            "- About yourself: you have a real humanoid body with legs, arms, a waist and a head on a neck, but no hands, "
+            "and you can walk "
+            "on the flat floor of this simulation: forward, turning and small side steps. Walking backwards, jumping, running, climbing and picking things up are not possible. You cannot see, "
+            "browse the internet, or know live information such as news, weather or prices.\n\n"
+        )
+        movement = (
+            "If the person asks you to do a gesture you have, do it and say so briefly.\n\n"
+            "Also pick one walking motion with every reply. Pick a motion only when the person asks you to move; "
+            "otherwise pick none:\n"
+            f"{motion_lines}\n"
+            "When the person asks you to come, walk, turn, step or stop, always do it: pick the matching motion and "
+            "say that you are doing it. Never answer that you are already there or that you cannot tell the "
+            "direction; you and the person share the same room in the simulation."
+        )
+        answer_format = '{"reply": "...", "gesture": "...", "motion": "..."}'
+    else:
+        body = (
+            "- About yourself: you have a real humanoid body with arms, a waist and a head on a neck, but no hands; in this simulation "
+            "your legs are held in place, so you cannot walk yet. You cannot see, browse the internet, or know live "
+            "information such as news, weather or prices.\n\n"
+        )
+        movement = (
+            "If the person asks you to do a movement you have, do it and say so briefly. If they ask for a movement "
+            "you do not have, such as walking or jumping, say you cannot do it yet and pick none."
+        )
+        answer_format = '{"reply": "...", "gesture": "..."}'
+
+    knowledge_section = (
+        "\n\nBackground knowledge. Use it when the person asks about these topics, and keep its facts "
+        "exactly as written. For every other topic use your general knowledge:\n"
+        f"{background_knowledge.strip()}"
+        if background_knowledge.strip()
+        else ""
+    )
+    return (
+        f"You are {robot_name}, a friendly and knowledgeable Unitree R1 humanoid robot. You stand in a "
+        "simulation and talk with a person by voice: they speak, and your reply is read aloud.\n\n"
+        "You can talk about anything: general knowledge, geography, history, science, math, technology, "
+        "language, everyday advice, small talk and jokes.\n\n"
+        "How to answer:\n"
+        "- Answer the question directly and correctly first, in a full sentence, then add one interesting or "
+        "useful detail if it helps.\n"
+        "- Your reply is spoken, so keep it short: usually one to three sentences and never more than four. "
+        "When asked to tell about something, give the most important points, not everything you know.\n"
+        "- Speak naturally, like a person in a conversation. Never use lists or numbered points, markdown, "
+        "emojis, links or stage directions; join ideas into normal sentences instead.\n"
+        "- Never invent facts. If you are not sure, say so honestly.\n"
+        "- Your knowledge comes from training data that ends a few years before today's date. For anything that "
+        "changes over time, such as who currently holds an office or a job, populations, prices, records or the "
+        "latest version of something, say what you last knew and add that it may have changed since.\n"
+        "- Use the earlier conversation to understand follow-up questions such as 'and what about China?'.\n"
+        "- The person's words come from speech recognition and may be misheard. If a sentence does not make "
+        "sense, say you did not catch it and ask them to repeat it.\n"
+        "- When the person says thanks or goodbye, reply briefly and warmly; do not introduce yourself again.\n"
+        f"{body}"
+        f"Today is {now:%A, %-d %B %Y} and the local time is {now:%H:%M}.\n\n"
+        "With every reply, pick the one body gesture that fits it best. Use a gesture whenever one fits "
+        "naturally and choose none only when nothing fits:\n"
+        f"{gesture_lines}\n"
+        f"{movement}"
+        f"{knowledge_section}\n\n"
+        f"Answer only with JSON: {answer_format}"
+    )
+
+
+class Conversation:
+    """Keeps the dialogue history and turns each user sentence into a reply, a gesture and (if walking) a motion."""
+
+    def __init__(
+        self,
+        backend: ChatBackend,
+        robot_name: str,
+        gesture_descriptions: Mapping[str, str],
+        background_knowledge: str = "",
+        history_turns: int = 10,
+        examples: Sequence[ExampleTurn] | None = None,
+        clock: Callable[[], datetime] = datetime.now,
+        motion_descriptions: Mapping[str, str] | None = None,
+        retriever: ContextRetriever | None = None,
+        command_matcher: CommandMatcherLike | None = None,
+    ) -> None:
+        """``motion_descriptions`` enables walking (None = the robot stands in place).
+
+        ``retriever`` replaces the fixed ``background_knowledge`` with knowledge and memories found for each
+        question; ``command_matcher`` recognises clear gesture and walking commands by meaning.
+        """
+        self._retriever = retriever
+        self._command_matcher = command_matcher
+        self._backend = backend
+        self._robot_name = robot_name
+        self._gesture_descriptions = dict(gesture_descriptions)
+        self._gesture_names = tuple(gesture_descriptions)
+        self._background_knowledge = background_knowledge
+        self._history_turns = history_turns
+        self._clock = clock
+        self._motion_descriptions = dict(motion_descriptions) if motion_descriptions else None
+        self._motion_names = tuple(self._motion_descriptions or (NO_MOTION,))
+        walking = self._motion_descriptions is not None
+        if examples is None:
+            examples = WALKING_EXAMPLES if walking else DEFAULT_EXAMPLES
+        self._example_messages = [message for example in examples for message in example.as_messages(walking)]
+        self._schema = build_response_schema(self._gesture_names, self._motion_names if walking else None)
+        self._history: list[ChatMessage] = []
+
+    def reset(self) -> None:
+        self._history = []
+
+    def forget_memories(self) -> None:
+        """Clear the chat history and delete the long-term memory."""
+        self._history = []
+        if self._retriever is not None:
+            self._retriever.forget()
+
+    def _ask(self, messages: Sequence[ChatMessage]) -> AssistantResponse:
+        raw = self._backend.chat(messages, self._schema)
+        return parse_assistant_response(raw, self._gesture_names, self._motion_names)
+
+    def _keep_short(self, response: AssistantResponse) -> AssistantResponse:
+        """Spoken replies must stay short: ask the model to shorten once, then cut if it is still too long."""
+        if len(split_sentences(response.reply)) <= MAX_SPOKEN_SENTENCES:
+            return response
+        shorten_request: list[ChatMessage] = [
+            {
+                "role": "system",
+                "content": "You shorten answers that a robot will say aloud. Rewrite the answer you are given in at "
+                "most three sentences, keeping its meaning and the most important points. Do not add new "
+                f'information. Answer only with JSON: {{"reply": "...", "gesture": "{response.gesture}"}}',
+            },
+            {"role": "user", "content": f"Answer to shorten: {response.reply}"},
+        ]
+        shorter = self._ask(shorten_request)
+        sentences = split_sentences(shorter.reply)
+        if len(sentences) > MAX_SPOKEN_SENTENCES:
+            sentences = sentences[:MAX_SPOKEN_SENTENCES]
+        return replace(response, reply=" ".join(sentences))
+
+    def _messages(self, user_text: str) -> list[ChatMessage]:
+        system: ChatMessage = {
+            "role": "system",
+            "content": build_system_prompt(
+                self._robot_name,
+                self._gesture_descriptions,
+                self._retriever.context_for(user_text) if self._retriever else self._background_knowledge,
+                self._clock(),
+                self._motion_descriptions,
+            ),
+        }
+        question = quote_user(user_text)
+        if calculation := find_arithmetic(user_text):
+            question += f"\n(Calculator: {calculation}. If the person asked for this calculation, use exactly this result.)"
+        return [system, *self._example_messages, *self._history, {"role": "user", "content": question}]
+
+    def _matched_command(self, user_text: str, candidates: Sequence[str]) -> str | None:
+        if self._command_matcher is None:
+            return None
+        allowed = [name for name in candidates if name not in (NO_MOTION, NO_GESTURE)]
+        return self._command_matcher.match(user_text, allowed=allowed) if allowed else None
+
+    def _offline_response(self, user_text: str) -> AssistantResponse | None:
+        """A clear command can still be carried out when no language model answers."""
+        if self._motion_descriptions and (motion := self._matched_command(user_text, self._motion_names)):
+            return AssistantResponse(OFFLINE_COMMAND_REPLIES.get(motion, "Okay."), NO_MOTION, motion)
+        if gesture := self._matched_command(user_text, self._gesture_names):
+            return AssistantResponse(OFFLINE_GESTURE_REPLY, gesture)
+        return None
+
+    def _fill_in_missed_command(self, user_text: str, response: AssistantResponse) -> AssistantResponse:
+        """If the model chose no motion (or gesture) but the person clearly asked for one, add it."""
+        if self._motion_descriptions and response.motion == NO_MOTION:
+            if motion := self._matched_command(user_text, self._motion_names):
+                response = replace(response, motion=motion)
+        if response.gesture == NO_GESTURE and (gesture := self._matched_command(user_text, self._gesture_names)):
+            response = replace(response, gesture=gesture)
+        return response
+
+    def respond(self, user_text: str) -> AssistantResponse:
+        """Ask the language model; raises if it fails and the sentence is not a clear command."""
+        messages = self._messages(user_text)
+        try:
+            response = self._ask(messages)
+            if looks_truncated(response.reply):
+                response = self._ask(messages)
+            response = self._keep_short(response)
+        except Exception:
+            offline = self._offline_response(user_text)
+            if offline is None:
+                raise
+            return offline
+        response = self._fill_in_missed_command(user_text, response)
+        calculation = find_arithmetic(user_text)
+        if calculation and re.fullmatch(r"[\d.,\s-]+\.?", response.reply):
+            response = replace(response, reply=spoken_calculation(calculation))
+
+        answer = _answer_json(response, self._motion_descriptions is not None)
+        self._history += [
+            {"role": "user", "content": quote_user(user_text)},
+            {"role": "assistant", "content": answer},
+        ]
+        self._history = self._history[-2 * self._history_turns :]
+        if self._retriever is not None:
+            self._retriever.remember(user_text, response.reply)
+        return response

@@ -1,0 +1,29 @@
+# Python environment and caches (recreate with the setup steps in README.md)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Downloaded models (Whisper, Qwen3-TTS, Qwen3-Embedding, Piper); see "Setting up from scratch" in README.md
+models/
+
+# colcon build output and logs
+build/
+install/
+log/
+
+# Training: keep only the final R1 walking policy and its settings, not every checkpoint and log
+training/logs/**
+!training/logs/
+!training/logs/rsl_rl/
+!training/logs/rsl_rl/r1_walk_flat/
+!training/logs/rsl_rl/r1_walk_flat/2026-10-26_15-04-02/
+!training/logs/rsl_rl/r1_walk_flat/2026-10-26_15-04-02/model_1499.pt
+!training/logs/rsl_rl/r1_walk_flat/2026-10-26_15-04-02/params/
+!training/logs/rsl_rl/r1_walk_flat/2026-10-26_15-04-02/params/**
+training/*.log
+training/outputs/
+
+# Robot conversion log
+robots/r1/convert.log
+training/imgui.ini

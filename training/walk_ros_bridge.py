@@ -1,0 +1,101 @@
+"""ROS 2 side of the walking scene: velocity commands and arm/waist targets in, clock, odometry and joints out."""
+
+from __future__ import annotations
+
+import threading
+import time
+from collections.abc import Sequence
+
+import rclpy
+import rclpy.executors
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from rclpy.node import Node
+from rosgraph_msgs.msg import Clock
+from sensor_msgs.msg import JointState
+
+# Stop walking if no velocity command arrives for this long (for example if the motion node crashed).
+COMMAND_TIMEOUT_S = 0.5
+MAX_COMMAND = (1.0, 0.3, 1.0)  # forward m/s, sideways m/s, turning rad/s: the ranges the policy was trained on
+MIN_COMMAND = (-0.5, -0.3, -1.0)
+
+
+class WalkRosBridge:
+    def __init__(self) -> None:
+        """The simulation loop must call spin_once() regularly to handle incoming messages."""
+        if not rclpy.ok():
+            rclpy.init()
+        self._node = Node("robot_walk_scene")
+        self._lock = threading.Lock()
+        self._velocity = (0.0, 0.0, 0.0)
+        self._velocity_time = 0.0
+        self._upper_body: dict[str, float] = {}
+
+        self._node.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
+        self._node.create_subscription(JointState, "/robot/joint_command", self._on_joint_command, 10)
+        self._clock_pub = self._node.create_publisher(Clock, "/clock", 10)
+        self._joint_pub = self._node.create_publisher(JointState, "/robot/joint_states", 10)
+        self._odom_pub = self._node.create_publisher(Odometry, "/robot/odom", 10)
+        self._executor = rclpy.executors.SingleThreadedExecutor()
+        self._executor.add_node(self._node)
+
+    def spin_once(self) -> None:
+        """Handle pending ROS messages without waiting."""
+        self._executor.spin_once(timeout_sec=0.0)
+
+    def _on_cmd_vel(self, msg: Twist) -> None:
+        command = (msg.linear.x, msg.linear.y, msg.angular.z)
+        clamped = tuple(min(max(value, low), high) for value, low, high in zip(command, MIN_COMMAND, MAX_COMMAND))
+        with self._lock:
+            self._velocity = clamped
+            self._velocity_time = time.monotonic()
+
+    def _on_joint_command(self, msg: JointState) -> None:
+        with self._lock:
+            self._upper_body.update(zip(msg.name, msg.position))
+
+    def velocity_command(self) -> tuple[float, float, float]:
+        with self._lock:
+            if time.monotonic() - self._velocity_time > COMMAND_TIMEOUT_S:
+                return (0.0, 0.0, 0.0)
+            return self._velocity
+
+    def upper_body_targets(self) -> dict[str, float]:
+        with self._lock:
+            return dict(self._upper_body)
+
+    def publish(
+        self,
+        sim_time_s: float,
+        joint_names: Sequence[str],
+        joint_positions: Sequence[float],
+        base_position: Sequence[float],
+        base_orientation_xyzw: Sequence[float],
+        base_linear_velocity: Sequence[float],
+        base_angular_velocity: Sequence[float],
+    ) -> None:
+        seconds = int(sim_time_s)
+        stamp = Clock().clock
+        stamp.sec, stamp.nanosec = seconds, int((sim_time_s - seconds) * 1e9)
+        self._clock_pub.publish(Clock(clock=stamp))
+
+        joints = JointState(name=list(joint_names), position=[float(p) for p in joint_positions])
+        joints.header.stamp = stamp
+        self._joint_pub.publish(joints)
+
+        odom = Odometry()
+        odom.header.stamp = stamp
+        odom.header.frame_id = "odom"
+        odom.child_frame_id = "pelvis"
+        pose = odom.pose.pose
+        pose.position.x, pose.position.y, pose.position.z = (float(v) for v in base_position)
+        q = pose.orientation
+        q.x, q.y, q.z, q.w = (float(v) for v in base_orientation_xyzw)
+        twist = odom.twist.twist
+        twist.linear.x, twist.linear.y, twist.linear.z = (float(v) for v in base_linear_velocity)
+        twist.angular.x, twist.angular.y, twist.angular.z = (float(v) for v in base_angular_velocity)
+        self._odom_pub.publish(odom)
+
+    def shutdown(self) -> None:
+        self._node.destroy_node()
+        rclpy.try_shutdown()
