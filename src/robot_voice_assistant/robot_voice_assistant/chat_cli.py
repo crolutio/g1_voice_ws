@@ -24,7 +24,13 @@ DEFAULT_KNOWLEDGE_DIR = os.path.expanduser("~/g1_voice_ws/src/robot_voice_assist
 
 def _ask(conversation: Conversation, backend: FallbackBackend, question: str) -> None:
     started = time.monotonic()
-    response = conversation.respond(question)
+    try:
+        response = conversation.respond(question)
+    except Exception as error:  # same behaviour as brain_node: report it and carry on
+        print(f"(no language model could answer: {type(error).__name__}: {error})\n", flush=True)
+        return
+    if backend.last_error and backend.last_used != "groq":
+        print(f"(Groq unavailable: {backend.last_error})", flush=True)
     motion = f", walk: {response.motion}" if response.motion != "none" else ""
     source = backend.last_used or "commands"
     print(f"Robot [{source}, {response.gesture}{motion}, {time.monotonic() - started:.1f}s]: {response.reply}\n", flush=True)
@@ -33,6 +39,7 @@ def _ask(conversation: Conversation, backend: FallbackBackend, question: str) ->
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--local", action="store_true", help="use only the local fallback model, not Groq")
+    parser.add_argument("--groq-model", default=BrainSettings.groq_model, help="Groq model, e.g. qwen/qwen3.8-27b")
     parser.add_argument("--fallback-model", default=BrainSettings.fallback_model)
     parser.add_argument("--knowledge-dir", default=DEFAULT_KNOWLEDGE_DIR)
     parser.add_argument("--no-memory", action="store_true", help="do not read or write the long-term memory")
@@ -42,6 +49,7 @@ def main() -> None:
 
     settings = BrainSettings(
         use_groq=not args.local,
+        groq_model=args.groq_model,
         fallback_model=args.fallback_model,
         knowledge_dir=args.knowledge_dir,
         use_memory=not args.no_memory,

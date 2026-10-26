@@ -36,12 +36,12 @@ def test_groq_sends_openai_style_request(monkeypatch: pytest.MonkeyPatch) -> Non
         return _ok('{"reply": "Hello", "gesture": "none"}')
 
     monkeypatch.setattr(requests, "post", fake_post)
-    client = GroqClient(api_key="test-key", model="llama-3.3-70b-versatile")
+    client = GroqClient(api_key="test-key", model="qwen/qwen3.8-27b")
     assert client.chat(MESSAGES, SCHEMA) == '{"reply": "Hello", "gesture": "none"}'
     assert seen["url"] == "https://api.groq.com/openai/v1/chat/completions"
     assert seen["headers"]["Authorization"] == "Bearer test-key"
     payload = seen["json"]
-    assert payload["model"] == "llama-3.3-70b-versatile"
+    assert payload["model"] == "qwen/qwen3.8-27b"
     assert payload["messages"] == MESSAGES
     assert payload["response_format"] == {"type": "json_object"}
 
@@ -134,3 +134,25 @@ def test_no_primary_means_fallback_only() -> None:
     fallback = FakeBackend("llama", ["only llama"])
     backend = FallbackBackend(None, fallback)
     assert backend.chat(MESSAGES, SCHEMA) == "only llama"
+
+
+def test_reasoning_models_get_low_effort_and_room_to_think(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[dict[str, object]] = []
+
+    def fake_post(url: str, json: dict[str, object], headers: dict[str, str], timeout: float) -> FakeResponse:
+        seen.append(json)
+        return _ok('{"reply": "Hi", "gesture": "none"}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    GroqClient(api_key="k", model="openai/gpt-oss-120b").chat(MESSAGES, SCHEMA)
+    GroqClient(api_key="k", model="qwen/qwen3.8-27b").chat(MESSAGES, SCHEMA)
+    assert seen[0]["reasoning_effort"] == "low"
+    assert seen[0]["max_tokens"] >= 1024  # thinking tokens count against the limit
+    assert "reasoning_effort" not in seen[1]
+
+
+def test_empty_answer_counts_as_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A reasoning model that runs out of tokens returns no content; the fallback should answer instead.
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _ok(""))
+    with pytest.raises(ValueError):
+        GroqClient(api_key="k", model="openai/gpt-oss-120b").chat(MESSAGES, SCHEMA)

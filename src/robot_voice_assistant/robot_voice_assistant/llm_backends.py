@@ -11,7 +11,7 @@ import requests
 from robot_voice_assistant.ollama_client import ChatMessage
 
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_GROQ_MODEL = "qwen/qwen3.8-27b"
 
 
 class ChatBackend(Protocol):
@@ -35,6 +35,9 @@ class GroqClient:
         self._headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
         self._model = model
         self._timeout_s = timeout_s
+        # GPT-OSS models think before answering; little thinking keeps replies fast, and the thinking
+        # tokens count against max_tokens, so they need more room than the spoken answer itself.
+        self._reasoning_effort = "low" if model.startswith("openai/gpt-oss") else None
 
     def chat(self, messages: Sequence[ChatMessage], response_schema: dict[str, object]) -> str:
         # Groq's JSON mode does not enforce the schema; the response parser checks gesture and motion names.
@@ -45,7 +48,8 @@ class GroqClient:
                 "messages": list(messages),
                 "response_format": {"type": "json_object"},
                 "temperature": 0.4,
-                "max_tokens": 300,
+                "max_tokens": 1024,
+                **({"reasoning_effort": self._reasoning_effort} if self._reasoning_effort else {}),
             },
             headers=self._headers,
             timeout=self._timeout_s,
@@ -53,7 +57,10 @@ class GroqClient:
         if response.status_code == 429:
             raise RateLimitedError(float(response.headers.get("retry-after", "30")))
         response.raise_for_status()
-        return str(response.json()["choices"][0]["message"]["content"])
+        content = response.json()["choices"][0]["message"].get("content") or ""
+        if not content.strip():
+            raise ValueError("Groq returned an empty answer")
+        return str(content)
 
 
 class FallbackBackend:

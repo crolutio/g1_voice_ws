@@ -3,7 +3,7 @@
 A simulated **Unitree R1 EDU** humanoid robot (26 degrees of freedom, no hands) that you can talk to and that walks when you ask it to. It runs in NVIDIA Isaac Sim and is connected through ROS 2.
 
 - **Listens** to your microphone and turns speech into text (Whisper large-v3-turbo, on the GPU).
-- **Thinks** of an answer with Groq's `llama-3.3-70b-versatile` (70 billion parameters, in the cloud), falling back to a local `llama3.1:8b` when Groq is unavailable.
+- **Thinks** of an answer with Groq's `qwen/qwen3.8-27b` (in the cloud), falling back to a local `llama3.1:8b` when Groq is unavailable.
 - **Speaks** the answer out loud (Qwen3-TTS).
 - **Moves**: gestures with its arms, waist and head while it talks, and walks forward and backward and turns when asked.
 - **Knows and remembers**: Qwen3-Embedding searches a folder of documents for each question, remembers earlier conversations, and recognises clear commands by meaning.
@@ -121,6 +121,26 @@ echo 'export GROQ_API_KEY="your-key-here"' >> ~/.bashrc && source ~/.bashrc
 
 Open new terminals after this, so they see the key. Without a key, the robot uses the local model only.
 
+### Choosing the Groq model
+
+Groq retired `llama-3.3-70b-versatile`. Run this to see the models your key can use:
+
+```bash
+curl -s https://api.groq.com/openai/v1/models -H "Authorization: Bearer $GROQ_API_KEY" | python3 -c "import json,sys; print('\n'.join(sorted(m['id'] for m in json.load(sys.stdin)['data'])))"
+```
+
+Measured with this assistant's 22 test questions (the chat tool, see [Check the conversation quality](#check-the-conversation-quality)):
+
+| Model                 | Answer time | Notes                                                                                     |
+| --------------------- | ----------- | ----------------------------------------------------------------------------------------- |
+| `qwen/qwen3.8-27b`    | 1.0–1.8 s   | **Default.** Fastest, fuller and more natural answers, no hidden reasoning tokens          |
+| `openai/gpt-oss-120b` | 1–7 s       | Largest model. A reasoning model: uses about 100 extra tokens per answer (effort set to low) |
+| `openai/gpt-oss-20b`  | —           | Smaller reasoning model                                                                   |
+
+Change it with `groq_model` in `config/voice_assistant.yaml`, or try one first with `chat --groq-model openai/gpt-oss-120b`.
+
+On the free Groq plan each model allows **8,000 tokens per minute** and 1,000 requests per day. One question uses about 2,000 tokens (instructions, examples, knowledge and history), so a quick back-and-forth can hit the limit; the local model then answers for 30 seconds. A paid Groq plan removes this.
+
 ## 3. Quick start: two terminals
 
 ### Terminal 1: the robot in the simulator
@@ -145,7 +165,7 @@ A window called **Newton Viewer** opens with the R1 standing on the floor. Wait 
 Wait for these lines (loading takes up to a minute the first time):
 
 ```text
-[brain_node]: Language model: Groq llama-3.3-70b-versatile, falling back to local llama3.1:8b
+[brain_node]: Language model: Groq qwen/qwen3.8-27b, falling back to local llama3.1:8b
 [brain_node]: Brain ready (walking enabled).
 [stt_node]: Listening. Say a wake word ('robot', 'r1', 'r one', 'are one') to talk to the robot.
 [tts_node]: TTS ready (Qwen3-TTS, voice ryan).
@@ -473,7 +493,7 @@ All assistant settings are in `src/robot_voice_assistant/config/voice_assistant.
 | Setting          | Default                   | Meaning                                                                  |
 | ---------------- | ------------------------- | ------------------------------------------------------------------------ |
 | `use_groq`       | `true`                    | Use Groq in the cloud (needs `GROQ_API_KEY`); `false` = local model only |
-| `groq_model`     | `llama-3.3-70b-versatile` | Groq model (70 billion parameters)                                       |
+| `groq_model`     | `qwen/qwen3.8-27b`        | Groq model (see [Choosing the Groq model](#choosing-the-groq-model))     |
 | `fallback_model` | `llama3.1:8b`             | Local Ollama model that answers when Groq is unavailable                 |
 | `ollama_url`     | `http://localhost:11434`  | Address of the Ollama server                                             |
 | `robot_name`     | `R1`                      | Name the robot uses for itself                                           |
@@ -592,7 +612,8 @@ source ~/isaacsim-env/bin/activate && cd ~/IsaacLab && python scripts/tools/conv
 | It reacts to other people in the room        | Keep the wake words on, and raise `threshold_ratio`.                                                                                                                           |
 | `GROQ_API_KEY is not set` in the log         | Set the key (see [Groq API key](#groq-api-key)) and start the assistant from a new terminal.                                                                                   |
 | `Groq unavailable (HTTPError: HTTP 401)`     | The key is wrong or expired. Create a new one in the Groq console and update `~/.bashrc`.                                                                                      |
-| `Groq unavailable (RateLimitedError ...)`    | Too many requests for your Groq plan. The local model answers until Groq accepts requests again.                                                                               |
+| `Groq unavailable (RateLimitedError ...)`    | Over the plan's 8,000 tokens per minute (about 4 questions a minute). The local model answers until Groq accepts requests again; see [Choosing the Groq model](#choosing-the-groq-model). |
+| `Groq unavailable (HTTPError: HTTP 404)`     | The model was retired. Pick one from the list in [Choosing the Groq model](#choosing-the-groq-model) and set `groq_model`.                                                       |
 | `Could not reach Ollama`                     | Start it with `~/.local/ollama/bin/ollama serve`.                                                                                                                              |
 | `model "llama3.1:8b" not found`              | Download it: `~/.local/ollama/bin/ollama pull llama3.1:8b`.                                                                                                                    |
 | An answer is wrong or outdated               | Add the correct fact to `config/knowledge/`.                                                                                                                                   |

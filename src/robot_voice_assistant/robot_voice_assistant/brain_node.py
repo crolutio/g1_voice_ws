@@ -1,6 +1,6 @@
 """ROS 2 node: turns transcripts into a spoken reply, a gesture and (when walking) a motion.
 
-Language model: Groq (llama-3.3-70b-versatile, key from the GROQ_API_KEY environment variable), falling
+Language model: Groq (qwen/qwen3.8-27b by default, key from the GROQ_API_KEY environment variable), falling
 back to a local Ollama model. Qwen3-Embedding finds relevant knowledge and memories for every question.
 """
 

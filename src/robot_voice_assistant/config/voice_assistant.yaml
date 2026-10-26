@@ -18,7 +18,7 @@ brain_node:
     # Language model: Groq in the cloud (needs the GROQ_API_KEY environment variable), and a local
     # Ollama model that answers when Groq is unavailable (no internet, no key, rate limit).
     use_groq: true
-    groq_model: llama-3.3-70b-versatile
+    groq_model: qwen/qwen3.8-27b   # or openai/gpt-oss-120b; see README "Choosing the Groq model"
     fallback_model: llama3.1:8b
     ollama_url: http://localhost:11434
     robot_name: R1
