@@ -41,6 +41,7 @@ tts_node:
     speaker: ryan             # aiden, dylan, eric, ryan (English); ono_anna, serena, sohee, uncle_fu, vivian
     language: english
     instruct: ""              # style instruction, e.g. "Speak in a warm, friendly tone."
+    fast_decoding: true       # Qwen3-TTS about twice as fast (CUDA graph); false = the library's own decoding
     player: aplay
 
 gesture_node:

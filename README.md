@@ -168,7 +168,7 @@ Wait for these lines (loading takes up to a minute the first time):
 [brain_node]: Language model: Groq qwen/qwen3.8-27b, falling back to local llama3.1:8b
 [brain_node]: Brain ready (walking enabled).
 [stt_node]: Listening. Say a wake word ('robot', 'r1', 'r one', 'are one') to talk to the robot.
-[tts_node]: TTS ready (Qwen3-TTS, voice ryan).
+[tts_node]: TTS ready (Qwen3-TTS, voice ryan, fast decoding).
 ```
 
 Now talk to it, mixing conversation and movement freely:
@@ -537,16 +537,36 @@ In `src/robot_voice_assistant/robot_voice_assistant/conversation.py`:
 | `speaker`     | `ryan`                                          | English voices: `aiden`, `dylan`, `eric`, `ryan`                      |
 | `language`    | `english`                                       | Language of the replies                                               |
 | `instruct`    | `""`                                            | Speaking style, for example `"Speak in a warm, friendly tone."`       |
+| `fast_decoding` | `true`                                        | Faster Qwen3-TTS decoding (CUDA graph); `false` = the library's own   |
 | `voice_model` | `~/g1_voice_ws/models/en_US-lessac-medium.onnx` | Piper voice file (only with `tts_engine: piper`)                      |
 | `player`      | `aplay`                                         | Program that plays the audio                                          |
 
-Replies are spoken sentence by sentence: the next sentence is generated while the current one plays, so the robot starts talking about one to two seconds after it has its answer. Qwen3-TTS needs the laptop's full power. Time to generate one second of speech on the RTX 4090 Laptop GPU:
+Replies are spoken in pieces: the first piece is kept short (one short sentence, or a long sentence cut at a comma or a word like "that"), and each next piece is generated while the previous one plays. The robot starts talking about 1.5 seconds after it has its answer.
 
-| Power mode                     | Time per second of speech        |
-| ------------------------------ | -------------------------------- |
-| Performance, charger connected | 0.6 s (faster than it is spoken) |
-| Power saver, charger connected | 3.0 s (long pauses)              |
-| Power saver, on battery        | 3.5 to 4 s (long pauses)         |
+`fast_decoding` replaces the way Qwen3-TTS predicts the 15 detail codes of every 1/12 second of audio: the library runs a full Hugging Face `generate()` call for each, which is mostly Python overhead. The replacement (`fast_code_predictor.py`) runs the same model in a fixed-size loop captured once as a CUDA graph. It picks the same codes as the library (checked by the tests), and halves the time.
+
+Time to generate one second of speech on the RTX 4090 Laptop GPU (Performance power mode, charger connected):
+
+| Decoding                        | Time per second of speech |
+| ------------------------------- | ------------------------- |
+| `fast_decoding: true` (default) | 0.35 s                    |
+| `fast_decoding: false`          | 0.7 s                     |
+
+In Power saver mode or on battery it is 4 to 6 times slower, which causes long pauses.
+
+### Where the time goes
+
+Measured from the moment you stop speaking until the robot's voice starts:
+
+| Step                                                    | Time       |
+| ------------------------------------------------------- | ---------- |
+| Waiting for the end of your sentence (0.7 s of silence) | 0.7 s      |
+| Speech to text (Whisper large-v3-turbo)                 | 0.2–0.6 s  |
+| Knowledge and memory search (Qwen3-Embedding)           | 0.03 s     |
+| Answer from Groq (`qwen/qwen3.8-27b`)                   | 1.1–1.6 s (sometimes up to 8 s) |
+| Answer from the local `llama3.1:8b` (when Groq is rate limited) | 4–8 s |
+| First spoken piece (Qwen3-TTS)                          | 1.3–1.8 s  |
+| **Total**                                               | **about 3.5–4.5 s** |
 
 ### Gestures and motions (`gesture_node`, `motion_node`)
 

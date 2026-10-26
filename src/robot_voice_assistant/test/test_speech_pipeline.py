@@ -18,6 +18,54 @@ def test_one_sentence_stays_one_chunk() -> None:
     assert spoken_chunks("Okay, stopping.") == ["Okay, stopping."]
 
 
+def test_first_sentence_is_spoken_on_its_own_so_the_voice_starts_early() -> None:
+    text = "The capital of India is New Delhi. It is a planned city built to replace Calcutta as the capital in the 1930s."
+    assert spoken_chunks(text) == [
+        "The capital of India is New Delhi.",
+        "It is a planned city built to replace Calcutta as the capital in the 1930s.",
+    ]
+
+
+def test_a_long_first_sentence_is_split_at_a_clause() -> None:
+    text = (
+        "Aideology is an AI infrastructure company based in Dubai that helps organizations move AI projects "
+        "from pilot to production using GPU-accelerated computing."
+    )
+    assert spoken_chunks(text) == [
+        "Aideology is an AI infrastructure company based in Dubai",
+        "that helps organizations move AI projects from pilot to production using GPU-accelerated computing.",
+    ]
+
+
+def test_long_sentences_are_split_at_clauses_and_commas() -> None:
+    text = (
+        "Sure. The sky looks blue because sunlight scatters off the air molecules in the atmosphere, "
+        "and blue light scatters much more strongly than red light does."
+    )
+    assert spoken_chunks(text) == [
+        "Sure. The sky looks blue",
+        "because sunlight scatters off the air molecules in the atmosphere,",
+        "and blue light scatters much more strongly than red light does.",
+    ]
+
+
+def test_a_long_first_sentence_is_cut_at_the_nearest_break_past_the_limit() -> None:
+    text = (
+        "The sky looks blue because sunlight scatters in the atmosphere, and blue light scatters more than other "
+        "colors. This effect is called Rayleigh scattering."
+    )
+    assert spoken_chunks(text) == [
+        "The sky looks blue because sunlight scatters in the atmosphere,",
+        "and blue light scatters more than other colors.",
+        "This effect is called Rayleigh scattering.",
+    ]
+
+
+def test_a_sentence_without_a_good_break_is_not_cut() -> None:
+    text = "Supercalifragilisticexpialidocious-is-a-very-long-made-up-word-that-has-no-spaces-in-it-at-all-anywhere."
+    assert spoken_chunks(text) == [text]
+
+
 class FakeEngine:
     sample_rate = 16000
 

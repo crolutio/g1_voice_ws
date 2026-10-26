@@ -33,6 +33,7 @@ class TtsNode(Node):
         self.declare_parameter("speaker", "ryan")
         self.declare_parameter("language", "english")
         self.declare_parameter("instruct", "")  # e.g. "Speak in a warm, friendly tone."
+        self.declare_parameter("fast_decoding", True)  # Qwen3-TTS: about twice as fast; false = library decoding
         self.declare_parameter("voice_model", DEFAULT_PIPER_VOICE)  # Piper voice file
         self.declare_parameter("use_cuda", False)  # Piper only
         self.declare_parameter("player", "aplay")
@@ -54,8 +55,11 @@ class TtsNode(Node):
                     speaker=str(self.get_parameter("speaker").value),
                     language=str(self.get_parameter("language").value),
                     instruct=str(self.get_parameter("instruct").value),
+                    fast_decoding=bool(self.get_parameter("fast_decoding").value),
+                    on_warning=self.get_logger().warn,
                 )
-                self.get_logger().info(f"TTS ready (Qwen3-TTS, voice {self.get_parameter('speaker').value}).")
+                decoding = ", fast decoding" if engine.fast_decoding else ""
+                self.get_logger().info(f"TTS ready (Qwen3-TTS, voice {self.get_parameter('speaker').value}{decoding}).")
                 return engine
             except Exception as error:  # e.g. not enough GPU memory
                 self.get_logger().error(f"Could not load Qwen3-TTS ({error}); using Piper instead.")
