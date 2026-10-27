@@ -345,3 +345,17 @@ def test_timing_is_recorded_when_the_language_model_fails() -> None:
     conversation.respond("Walk forward")
     assert conversation.last_timing is not None
     assert [name for name, _ in conversation.last_timing.steps][:2] == ["knowledge search", "language model"]
+
+
+def test_system_prompt_explains_how_a_conversation_ends() -> None:
+    backend = FakeBackend(['{"reply": "Goodbye!", "gesture": "wave_right"}'])
+    _conversation(backend).respond("Goodbye.")
+    prompt = backend.calls[0][0]["content"]
+    assert "say 'robot'" in prompt
+    assert "stop listening" in prompt
+
+
+def test_system_prompt_warns_that_names_may_be_misheard() -> None:
+    backend = FakeBackend(['{"reply": "In Dubai.", "gesture": "none"}'])
+    _conversation(backend).respond("Where is ideology based?")
+    assert "ideology" in backend.calls[0][0]["content"].lower()

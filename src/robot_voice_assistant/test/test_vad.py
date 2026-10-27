@@ -77,3 +77,9 @@ def test_reset_discards_partial_utterance() -> None:
 
 def test_reports_how_long_it_waits_for_silence_before_ending_an_utterance() -> None:
     assert EnergyVadSegmenter(sample_rate=16000, frame_ms=30, end_silence_ms=700).end_silence_s == pytest.approx(0.69)  # 23 frames of 30 ms
+
+
+def test_a_short_word_like_stop_is_kept() -> None:
+    segmenter = EnergyVadSegmenter(sample_rate=SAMPLE_RATE)
+    frames = _frames(0.001, 1.0, seed=1) + _frames(0.2, 0.21, seed=2) + _frames(0.001, 1.5, seed=3)
+    assert len(_feed(segmenter, frames)) == 1

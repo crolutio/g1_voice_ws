@@ -22,7 +22,7 @@ class EnergyVadSegmenter:
         threshold_ratio: float = 3.0,
         min_rms: float = 0.01,
         end_silence_ms: int = 700,
-        min_speech_ms: int = 250,
+        min_speech_ms: int = 150,  # a short "Stop." in noise is about 200 ms above the threshold
         max_utterance_s: float = 15.0,
         pre_roll_ms: int = 300,
         calibration_ms: int = 500,
@@ -52,6 +52,11 @@ class EnergyVadSegmenter:
     @property
     def is_calibrated(self) -> bool:
         return len(self._calibration_rms) >= self._calibration_frames
+
+    @property
+    def in_utterance(self) -> bool:
+        """Speech has started and not yet ended."""
+        return self._in_utterance
 
     @property
     def end_silence_s(self) -> float:

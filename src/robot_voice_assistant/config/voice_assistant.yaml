@@ -5,13 +5,21 @@ stt_node:
     compute_type: float16
     language: en
     mic_device: default       # ALSA device for arecord, e.g. "default" or "plughw:1,6"
+    recorder: arecord         # program that records the microphone (scripts/fake_microphone.py plays test speech)
     min_rms: 0.01             # lowest level that can count as speech
     threshold_ratio: 2.5      # speech must be this many times louder than the noise floor (see /voice/mic_level)
     unmute_delay_s: 0.5
-    # Only sentences containing a wake word are answered (nearby conversations are ignored).
-    # Use [""] to answer everything.
+    end_silence_ms: 700       # this much silence ends a sentence (900 hears slightly better in loud noise, answers 0.2 s later)
+    # Saying a wake word starts a conversation: from then on everything is answered without the wake word,
+    # until you say goodbye ("goodbye", "stop listening", "that's all", "go to sleep", ...). Outside a
+    # conversation, speech is ignored. "Robot" is recognised most reliably. Use [""] to answer everything.
     wake_words: ["robot", "r1", "r one", "are one"]
-    follow_up_s: 8.0          # after a reply, follow-up questions need no wake word for this long
+    wake_word_sound_alikes: ["robert"]  # what Whisper sometimes writes for "robot"; only at the start of a sentence
+    conversation_idle_timeout_s: 0.0  # 0 = a conversation lasts until you end it; e.g. 300 = ends after 5 quiet minutes
+    wake_word_wait_s: 3.0     # after the wake word alone ("Robot..."), wait this long for the question, then greet
+    # Names Whisper should expect (given to it as a prompt), so it writes "Aideology" and not "ideology"
+    vocabulary: ["Aideology", "Jorge Colotto", "Dubai Silicon Oasis", "MDS"]
+    beam_size: 5
 
 brain_node:
   ros__parameters:

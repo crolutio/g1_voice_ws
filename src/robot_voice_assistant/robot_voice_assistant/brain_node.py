@@ -38,6 +38,9 @@ class BrainNode(Node):
         self._conversation: Conversation | None = None
         self._busy = threading.Lock()
         self._speech_ended: float | None = None  # when the person stopped saying the current request (wall clock)
+        # What was said while the brain was busy, answered next (several pieces are joined)
+        self._pending: tuple[str, float | None] | None = None
+        self._pending_lock = threading.Lock()
 
         self._reply_pub = self.create_publisher(String, "/voice/reply", 10)
         self._gesture_pub = self.create_publisher(String, "/robot/gesture", 10)
@@ -65,6 +68,10 @@ class BrainNode(Node):
                 self.get_logger().warn(f"Local fallback model not available ({error}). Is Ollama running?")
         walking = "walking enabled" if self._settings.can_walk else "standing in place"
         self.get_logger().info(f"Brain ready ({walking}).")
+        with self._pending_lock:  # something said while loading
+            pending, self._pending = self._pending, None
+            if pending is not None and self._busy.acquire(blocking=False):
+                threading.Thread(target=self._respond, args=pending, daemon=True).start()
 
     def _on_reset(self, _msg: String) -> None:
         with self._busy:
@@ -87,9 +94,12 @@ class BrainNode(Node):
         speech_ended, self._speech_ended = self._speech_ended, None  # typed requests have no spoken end
         if not text:
             return
-        if not self._busy.acquire(blocking=False):
-            self.get_logger().warn("Still busy with the previous request; dropped a new one.")
-            return
+        with self._pending_lock:
+            if not self._busy.acquire(blocking=False):
+                earlier = self._pending[0] + " " if self._pending else ""
+                self._pending = (earlier + text, speech_ended)
+                self.get_logger().info("Still answering the previous request; will answer this one next.")
+                return
         threading.Thread(target=self._respond, args=(text, speech_ended), daemon=True).start()
 
     def _log_timing(self, speech_ended: float | None) -> None:
@@ -123,7 +133,12 @@ class BrainNode(Node):
                 self._motion_pub.publish(String(data=response.motion))
             self._reply_pub.publish(String(data=response.reply))
         finally:
-            self._busy.release()
+            with self._pending_lock:
+                pending, self._pending = self._pending, None
+                if pending is None:
+                    self._busy.release()
+            if pending is not None:  # keep the lock and answer what was said in the meantime
+                self._respond(*pending)
 
 
 def main() -> None:

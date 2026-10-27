@@ -8,7 +8,7 @@ A simulated **Unitree R1 EDU** humanoid robot (26 degrees of freedom, no hands) 
 - **Moves**: gestures with its arms, waist and head while it talks, and walks forward and backward and turns when asked.
 - **Knows and remembers**: Qwen3-Embedding searches a folder of documents for each question, remembers earlier conversations, and recognises clear commands by meaning.
 
-Conversation, gestures and walking all work together in one mode, started from **two terminals**. It only answers when you address it with a **wake word**: "robot" or "R1".
+Conversation, gestures and walking all work together in one mode, started from **two terminals**. Say the **wake word** "robot" to start a conversation; from then on it answers everything without the wake word, until you say **"goodbye"** (or "stop listening", "that's all", "go to sleep").
 
 ## Contents
 
@@ -37,7 +37,7 @@ There are two parts, one per terminal. They talk to each other over ROS 2 topics
 
 | Node           | What it does                                                                                                                    |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `stt_node`     | Records the microphone, detects speech, transcribes it, and keeps only sentences that contain a wake word.                      |
+| `stt_node`     | Records the microphone, detects speech, transcribes it, and passes on what is said in a conversation started with the wake word. |
 | `brain_node`   | Finds relevant knowledge and memories, asks Groq (or the local fallback) and gets back a reply, a gesture and a walking motion. |
 | `tts_node`     | Speaks the reply. While it speaks, the microphone is muted so the robot does not hear itself.                                   |
 | `gesture_node` | Turns the gesture name into smooth arm, waist and head movements, sent to the robot 50 times per second.                        |
@@ -179,7 +179,8 @@ Now talk to it, mixing conversation and movement freely:
 - "Robot, turn around."
 - "Robot, wave at me."
 - "Robot, tell me about Aideology."
-- "Stop!" (within 8 seconds of an answer, no wake word is needed)
+- "Stop!" (no wake word needed: the conversation is still on)
+- "Goodbye." (ends the conversation; say "robot" to start a new one)
 
 To stop, press `Ctrl+C` in each terminal.
 
@@ -250,9 +251,16 @@ Launch arguments (they also work with `start_assistant.sh`):
 
 1. Make sure both terminals are running (see [Quick start](#3-quick-start-two-terminals)).
 2. Speak clearly, about an arm's length from the laptop microphone.
-3. Include a wake word: "robot" or "R1".
+3. Start with the wake word: "Robot, what is the capital of India?". You can also say just "Robot", pause, and then ask; if no question follows within 3 seconds, it says hello. "Robot" is recognised most reliably; "R1" is often heard as "are we" or "oh one".
 4. Wait for the answer. While the robot speaks, it does not listen.
-5. For 8 seconds after each answer, you can continue without the wake word.
+5. Keep talking without the wake word: the conversation lasts until you end it with "goodbye", "stop listening", "that's all" or "go to sleep". "Stop" on its own stops walking and keeps the conversation going.
+
+The log shows when a conversation starts and ends:
+
+```text
+[stt_node]: Conversation started: no wake word needed until you say goodbye.
+[stt_node]: Conversation ended. Say a wake word ('robot', 'r1', 'r one', 'are one') to start again.
+```
 
 The assistant terminal shows what it understood and decided:
 
@@ -485,8 +493,14 @@ All assistant settings are in `src/robot_voice_assistant/config/voice_assistant.
 | `mic_device`      | `default`                             | Microphone for `arecord`; list devices with `arecord -l`, for example `plughw:1,6`         |
 | `min_rms`         | `0.01`                                | Lowest sound level that can count as speech                                                |
 | `threshold_ratio` | `2.5`                                 | How much louder than background noise speech must be; lower it if the robot does not react |
-| `wake_words`      | `["robot", "r1", "r one", "are one"]` | Words that address the robot; `[""]` answers everything (not recommended in a shared room) |
-| `follow_up_s`     | `8.0`                                 | Seconds after an answer during which no wake word is needed                                |
+| `wake_words`      | `["robot", "r1", "r one", "are one"]` | Words that start a conversation; `[""]` answers everything (not recommended in a shared room) |
+| `wake_word_sound_alikes` | `["robert"]`                     | What Whisper sometimes writes for "robot"; counts only at the start of a sentence          |
+| `conversation_idle_timeout_s` | `0.0`                     | `0` = a conversation lasts until you say goodbye; e.g. `300` ends it after 5 quiet minutes |
+| `wake_word_wait_s` | `3.0`                                | After the wake word alone, how long to wait for the question before saying hello           |
+| `end_silence_ms`  | `700`                                 | Silence that ends a sentence; `900` hears slightly better in loud noise but answers 0.2 s later |
+| `vocabulary`      | `["Aideology", "Jorge Colotto", ...]` | Names Whisper should expect, given to it as a prompt; add your own names here              |
+| `beam_size`       | `5`                                   | Whisper beam search width                                                                  |
+| `recorder`        | `arecord`                             | Program that records the microphone (`scripts/fake_microphone.py` plays test speech)       |
 | `unmute_delay_s`  | `0.5`                                 | Pause after the robot stops speaking before it listens again                               |
 
 ### Language model (`brain_node`)
@@ -680,6 +694,48 @@ The tests cover speech detection, the wake word check, the language model backen
 cd ~/g1_voice_ws/src/robot_voice_assistant && env -i HOME=$HOME PATH=/usr/bin:/bin ../../.venv/bin/python -m pytest test
 ```
 
+### Check speech recognition
+
+`scripts/check_speech_recognition.py` speaks 26 test sentences in 6 Qwen3-TTS voices at different loudness, adds a quiet room, a fan or loud noise, and streams them through the same steps as `stt_node` (speech detection, Whisper with the vocabulary prompt, the wake word and conversation check). It reports how many came out exactly right:
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/g1_voice_ws/.venv/bin/activate
+python ~/g1_voice_ws/src/robot_voice_assistant/scripts/check_speech_recognition.py --show-transcripts
+```
+
+Results on the RTX 4090 Laptop GPU (468 sentences):
+
+| Setup                                      | Quiet room  | Fan         | Loud noise  | All       | Word error rate |
+| ------------------------------------------ | ----------- | ----------- | ----------- | --------- | --------------- |
+| Before (no vocabulary, 8-second follow-up) | —           | —           | —           | 45.1%     | 24.0%           |
+| Without the vocabulary prompt              | 97/156      | 94/156      | 88/156      | 59.6%     | 14.4%           |
+| **With the vocabulary prompt (default)**   | **146/156** | **144/156** | **131/156** | **90.0%** | **5.2%**        |
+
+It also counts names and walking commands that appear in a transcript without being said, because Whisper can copy words from its prompt into noisy speech: none with the default settings. That is why the prompt contains only names and no commands.
+
+What it still gets wrong: "R1" as a wake word (heard as "are we", "oh one"), "Aideology" sometimes as "ideology" (the brain is told to read it as Aideology), "turn" as "tune" (the brain still understands it), and a quiet voice in loud noise.
+
+### Test whole conversations
+
+`scripts/fake_microphone.py` stands in for the microphone, and `scripts/check_conversation_live.py` speaks whole conversations into the running assistant, waits for every reply like a person would, and checks what was heard, the reply, the gesture, the motion and whether the conversation is still on. Start the assistant with the fake microphone and silent speakers, in one terminal:
+
+```bash
+mkdir -p /tmp/robot_mic && sed -e "s|    recorder: arecord .*|    recorder: \"python3 $HOME/g1_voice_ws/src/robot_voice_assistant/scripts/fake_microphone.py --spool /tmp/robot_mic --noise 0.01\"|" -e "s|    player: aplay|    player: /bin/true|" ~/g1_voice_ws/src/robot_voice_assistant/config/voice_assistant.yaml > /tmp/robot_mic/test.yaml
+```
+
+```bash
+~/g1_voice_ws/start_assistant.sh config:=/tmp/robot_mic/test.yaml
+```
+
+`--noise` sets the background noise (0.0015 quiet room, 0.01 fan, 0.02 loud). The conversations use the real long-term memory file unless you also change `memory_file` in the copy.
+
+and run the conversations in a second terminal:
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/g1_voice_ws/.venv/bin/activate && source ~/g1_voice_ws/install/setup.bash
+python ~/g1_voice_ws/src/robot_voice_assistant/scripts/check_conversation_live.py --spool /tmp/robot_mic
+```
+
 ### Check the conversation quality
 
 Question sets are in `src/robot_voice_assistant/test/conversations/`. Run one and read the answers, for example after changing the model, the rules or the examples:
@@ -749,7 +805,7 @@ cd ~/g1_voice_ws/src/robot_voice_assistant && ../../.venv/bin/python scripts/bui
 
 ### Privacy
 
-- **With a Groq key, what you say to the robot is sent to Groq** (only sentences addressed to it with the wake word), together with the relevant knowledge passages and memories. Without a key, or with `use_groq: false`, everything runs on this computer.
+- **With a Groq key, what you say to the robot is sent to Groq** (everything said during a conversation, from the wake word until "goodbye"), together with the relevant knowledge passages and memories. Without a key, or with `use_groq: false`, everything runs on this computer.
 - Speech recognition, the voice, embeddings and the fallback model always run on this computer.
-- The microphone is only open while `stt_node` runs and is released when you press `Ctrl+C`, close the terminal, or the node crashes. Speech without a wake word is dropped immediately and is not logged, stored or sent anywhere.
+- The microphone is only open while `stt_node` runs and is released when you press `Ctrl+C`, close the terminal, or the node crashes. Speech outside a conversation is dropped immediately and is not logged, stored or sent anywhere. **During a conversation the robot answers everything it hears, including other people in the room**, so end it with "goodbye" when you are done, or set `conversation_idle_timeout_s`.
 - Long-term memory stores your conversations in `~/.local/share/robot_voice_assistant/memory.jsonl` on this computer. Turn it off with `use_memory: false`, or delete it with `/voice/forget`.
