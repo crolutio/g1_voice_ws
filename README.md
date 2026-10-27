@@ -62,6 +62,7 @@ There are two parts, one per terminal. They talk to each other over ROS 2 topics
 | Topic                   | Type                         | Published by   | Meaning                                            |
 | ----------------------- | ---------------------------- | -------------- | -------------------------------------------------- |
 | `/voice/transcript`     | `std_msgs/String`            | `stt_node`     | What you said (wake word removed)                  |
+| `/voice/speech_ended`   | `std_msgs/Float64`           | `stt_node`     | When you stopped speaking (Unix time), for the timing lines in the logs |
 | `/voice/reply`          | `std_msgs/String`            | `brain_node`   | What the robot will say                            |
 | `/voice/speaking`       | `std_msgs/Bool`              | `tts_node`     | `true` while the robot is talking                  |
 | `/voice/listening`      | `std_msgs/Bool`              | `stt_node`     | `false` while a sentence is being transcribed      |
@@ -556,7 +557,23 @@ In Power saver mode or on battery it is 4 to 6 times slower, which causes long p
 
 ### Where the time goes
 
-Measured from the moment you stop speaking until the robot's voice starts:
+Every log line starts with the local time to the millisecond, and each step logs how long it took. One question in terminal 2 looks like this:
+
+```text
+[INFO] [2026-10-27 09:50:40.535] [stt_node]: Heard: Robot, what is the capital of India? (3.1 s of speech; waited 0.69 s for silence, speech to text 0.31 s)
+[INFO] [2026-10-27 09:50:42.646] [brain_node]: [groq] Reply: 'The capital of India is New Delhi. ...' gesture=nod motion=none
+[INFO] [2026-10-27 09:50:42.646] [brain_node]: Timing: knowledge search 0.02 s, language model 1.06 s, command matching 0.01 s, memory write 0.01 s, total 1.11 s (groq); reply ready 2.11 s after you stopped speaking
+[INFO] [2026-10-27 09:50:43.798] [tts_node]: Voice started 1.15 s after the reply arrived; 3.26 s after you stopped speaking
+[INFO] [2026-10-27 09:50:49.128] [tts_node]: Finished speaking after 7.48 s; voice generated in 1.15 s (34 characters), 1.33 s (42 characters)
+```
+
+- `stt_node`: the wait for 0.69 s of silence that ends your sentence, and the Whisper time.
+- `brain_node`: each step of answering, which model answered (`groq`, `llama` or `commands`), and the time since you stopped speaking.
+- `tts_node`: when the voice started, and how long each spoken piece took to generate. If a reply had to wait for the previous one to finish, the wait is shown too.
+
+"After you stopped speaking" uses the `/voice/speech_ended` topic from `stt_node`, so it is left out for typed requests. To use your own log format, set `RCUTILS_CONSOLE_OUTPUT_FORMAT` before starting the assistant.
+
+Typical times, measured from the moment you stop speaking until the robot's voice starts:
 
 | Step                                                    | Time       |
 | ------------------------------------------------------- | ---------- |

@@ -11,12 +11,13 @@ import threading
 
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import Float64, String
 
 from robot_voice_assistant.assistant_factory import BrainSettings, create_backend, create_conversation
 from robot_voice_assistant.conversation import Conversation
 from robot_voice_assistant.node_runner import run_node
 from robot_voice_assistant.ollama_client import OllamaClient
+from robot_voice_assistant.timing import seconds_since
 
 DEFAULT_KNOWLEDGE_DIR = os.path.join(get_package_share_directory("robot_voice_assistant"), "config", "knowledge")
 
@@ -36,10 +37,12 @@ class BrainNode(Node):
         self.get_logger().info(f"Language model: {description}")
         self._conversation: Conversation | None = None
         self._busy = threading.Lock()
+        self._speech_ended: float | None = None  # when the person stopped saying the current request (wall clock)
 
         self._reply_pub = self.create_publisher(String, "/voice/reply", 10)
         self._gesture_pub = self.create_publisher(String, "/robot/gesture", 10)
         self._motion_pub = self.create_publisher(String, "/robot/motion", 10)
+        self.create_subscription(Float64, "/voice/speech_ended", self._on_speech_ended, 10)
         self.create_subscription(String, "/voice/transcript", self._on_transcript, 10)
         self.create_subscription(String, "/voice/reset", self._on_reset, 10)
         self.create_subscription(String, "/voice/forget", self._on_forget, 10)
@@ -76,16 +79,28 @@ class BrainNode(Node):
                 self._conversation.forget_memories()
         self.get_logger().info("Long-term memory deleted.")
 
+    def _on_speech_ended(self, msg: Float64) -> None:
+        self._speech_ended = msg.data
+
     def _on_transcript(self, msg: String) -> None:
         text = msg.data.strip()
+        speech_ended, self._speech_ended = self._speech_ended, None  # typed requests have no spoken end
         if not text:
             return
         if not self._busy.acquire(blocking=False):
             self.get_logger().warn("Still busy with the previous request; dropped a new one.")
             return
-        threading.Thread(target=self._respond, args=(text,), daemon=True).start()
+        threading.Thread(target=self._respond, args=(text, speech_ended), daemon=True).start()
 
-    def _respond(self, text: str) -> None:
+    def _log_timing(self, speech_ended: float | None) -> None:
+        if self._conversation is None or self._conversation.last_timing is None:
+            return
+        line = f"Timing: {self._conversation.last_timing.summary()} ({self._backend.last_used or 'commands'})"
+        if (since_speech := seconds_since(speech_ended)) is not None:
+            line += f"; reply ready {since_speech:.2f} s after you stopped speaking"
+        self.get_logger().info(line)
+
+    def _respond(self, text: str, speech_ended: float | None = None) -> None:
         try:
             if self._conversation is None:
                 return
@@ -93,6 +108,7 @@ class BrainNode(Node):
                 response = self._conversation.respond(text)
             except Exception as error:  # network or server failure must not kill the node
                 self.get_logger().error(f"No language model could answer: {error}")
+                self._log_timing(speech_ended)
                 self._reply_pub.publish(String(data="Sorry, I can't think right now. Please try again in a moment."))
                 return
             if self._backend.last_error:
@@ -101,6 +117,7 @@ class BrainNode(Node):
                 f"[{self._backend.last_used or 'commands'}] Reply: {response.reply!r} "
                 f"gesture={response.gesture} motion={response.motion}"
             )
+            self._log_timing(speech_ended)
             self._gesture_pub.publish(String(data=response.gesture))
             if response.motion != "none":
                 self._motion_pub.publish(String(data=response.motion))

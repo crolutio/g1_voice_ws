@@ -12,7 +12,7 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, Float32MultiArray, String
+from std_msgs.msg import Bool, Float32MultiArray, Float64, String
 
 from robot_voice_assistant.cuda_libs import preload_cuda_libraries
 from robot_voice_assistant.node_runner import run_node
@@ -72,9 +72,12 @@ class SttNode(Node):
         )
         self._robot_speaking = False
         self._muted_until = 0.0
-        self._utterances: queue.Queue[np.ndarray] = queue.Queue(maxsize=4)
+        self._utterances: queue.Queue[tuple[np.ndarray, float]] = queue.Queue(maxsize=4)  # (audio, wall time it ended)
 
         self._transcript_pub = self.create_publisher(String, "/voice/transcript", 10)
+        # Wall-clock time (time.time()) at which the person stopped speaking, published just before each transcript,
+        # so the brain and the voice can log how long after that their step finished.
+        self._speech_ended_pub = self.create_publisher(Float64, "/voice/speech_ended", 10)
         self._listening_pub = self.create_publisher(Bool, "/voice/listening", 10)
         # [rms of the latest 30 ms frame, current speech threshold], ~10 Hz, for tuning min_rms/threshold_ratio.
         self._level_pub = self.create_publisher(Float32MultiArray, "/voice/mic_level", 10)
@@ -128,18 +131,20 @@ class SttNode(Node):
             utterance = self._segmenter.push(frame)
             if utterance is not None:
                 try:
-                    self._utterances.put_nowait(utterance)
+                    self._utterances.put_nowait((utterance, time.time()))
                 except queue.Full:
                     self.get_logger().warn("Transcriber is behind; dropping an utterance.")
 
     def _transcribe_loop(self) -> None:
         while rclpy.ok():
-            utterance = self._utterances.get()
+            utterance, ended_at = self._utterances.get()
             if self._is_muted():
                 continue
             self._listening_pub.publish(Bool(data=False))
+            transcribe_started = time.perf_counter()
             segments, _ = self._model.transcribe(utterance, language=self._language, beam_size=5)
             segment_list = list(segments)
+            transcribe_s = time.perf_counter() - transcribe_started
             text = "".join(segment.text for segment in segment_list).strip()
             no_speech = max((segment.no_speech_prob for segment in segment_list), default=1.0)
             self._listening_pub.publish(Bool(data=True))
@@ -149,7 +154,12 @@ class SttNode(Node):
             if request is None:
                 self.get_logger().debug("Ignored speech that was not addressed to the robot.")
                 continue
-            self.get_logger().info(f"Heard: {request}")
+            wait_s = self._segmenter.end_silence_s
+            self.get_logger().info(
+                f"Heard: {request} ({len(utterance) / SAMPLE_RATE:.1f} s of speech; "
+                f"waited {wait_s:.2f} s for silence, speech to text {transcribe_s:.2f} s)"
+            )
+            self._speech_ended_pub.publish(Float64(data=ended_at - wait_s))
             self._transcript_pub.publish(String(data=request))
 
     def destroy_node(self) -> None:

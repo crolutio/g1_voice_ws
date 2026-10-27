@@ -129,3 +129,23 @@ def test_pipeline_can_be_used_from_several_threads_one_reply_at_a_time() -> None
     for thread in threads:
         thread.join()
     assert len(player.played) == 3
+
+
+def test_speaking_reports_when_the_voice_started_and_how_long_each_piece_took() -> None:
+    engine, player = FakeEngine(delay_s=0.05), FakePlayer(delay_s=0.05)
+    first_audio: list[float] = []
+    timing = SpeechPipeline(engine, player).speak(
+        "First sentence here. Second sentence here.", min_chars=5, on_first_audio=first_audio.append
+    )
+    assert len(first_audio) == 1
+    assert first_audio[0] == timing.first_audio_s
+    assert 0.04 < timing.first_audio_s < 0.2
+    assert [chars for chars, _ in timing.pieces] == [len("First sentence here."), len("Second sentence here.")]
+    assert all(0.04 < seconds < 0.2 for _, seconds in timing.pieces)
+    assert timing.total_s >= timing.first_audio_s + 0.1  # both pieces were played
+
+
+def test_nothing_spoken_reports_no_first_audio() -> None:
+    timing = SpeechPipeline(FakeEngine(), FakePlayer()).speak("   ")
+    assert timing.first_audio_s is None
+    assert timing.pieces == []

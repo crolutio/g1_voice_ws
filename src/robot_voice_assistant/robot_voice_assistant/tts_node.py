@@ -8,10 +8,11 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float64, String
 
 from robot_voice_assistant.node_runner import run_node
 from robot_voice_assistant.speech_pipeline import (
@@ -20,7 +21,9 @@ from robot_voice_assistant.speech_pipeline import (
     Qwen3SpeechEngine,
     SpeechEngine,
     SpeechPipeline,
+    SpeechTiming,
 )
+from robot_voice_assistant.timing import seconds_since
 
 DEFAULT_PIPER_VOICE = os.path.expanduser("~/g1_voice_ws/models/en_US-lessac-medium.onnx")
 
@@ -42,8 +45,11 @@ class TtsNode(Node):
         self._pipeline = SpeechPipeline(
             engine, AplayPlayer(str(self.get_parameter("player").value)), on_error=self.get_logger().error
         )
-        self._replies: queue.Queue[str] = queue.Queue()
+        # (reply text, wall time it arrived, wall time the person stopped speaking or None)
+        self._replies: queue.Queue[tuple[str, float, float | None]] = queue.Queue()
+        self._speech_ended: float | None = None
         self._speaking_pub = self.create_publisher(Bool, "/voice/speaking", 10)
+        self.create_subscription(Float64, "/voice/speech_ended", self._on_speech_ended, 10)
         self.create_subscription(String, "/voice/reply", self._on_reply, 10)
         threading.Thread(target=self._speak_loop, daemon=True).start()
 
@@ -67,16 +73,37 @@ class TtsNode(Node):
         self.get_logger().info(f"TTS ready (Piper, {os.path.basename(str(self.get_parameter('voice_model').value))}).")
         return engine
 
+    def _on_speech_ended(self, msg: Float64) -> None:
+        self._speech_ended = msg.data
+
     def _on_reply(self, msg: String) -> None:
+        speech_ended, self._speech_ended = self._speech_ended, None
         if msg.data.strip():
-            self._replies.put(msg.data.strip())
+            self._replies.put((msg.data.strip(), time.time(), speech_ended))
+
+    def _log_first_audio(self, seconds: float, queued_s: float, speech_ended: float | None) -> None:
+        line = f"Voice started {queued_s + seconds:.2f} s after the reply arrived"
+        if queued_s > 0.05:
+            line += f" (of which {queued_s:.2f} s waiting for the previous reply to finish)"
+        if (since_speech := seconds_since(speech_ended)) is not None:
+            line += f"; {since_speech:.2f} s after you stopped speaking"
+        self.get_logger().info(line)
+
+    def _log_finished(self, timing: SpeechTiming) -> None:
+        pieces = ", ".join(f"{seconds:.2f} s ({chars} characters)" for chars, seconds in timing.pieces)
+        self.get_logger().info(f"Finished speaking after {timing.total_s:.2f} s; voice generated in {pieces or 'nothing'}")
 
     def _speak_loop(self) -> None:
         while rclpy.ok():
-            text = self._replies.get()
+            text, arrived, speech_ended = self._replies.get()
+            queued_s = time.time() - arrived
             self._speaking_pub.publish(Bool(data=True))
             try:
-                self._pipeline.speak(text)
+                timing = self._pipeline.speak(
+                    text,
+                    on_first_audio=lambda seconds: self._log_first_audio(seconds, queued_s, speech_ended),
+                )
+                self._log_finished(timing)
             except Exception as error:  # audio device problems must not kill the node
                 self.get_logger().error(f"Playback failed: {error}")
             finally:

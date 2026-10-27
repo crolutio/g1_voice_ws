@@ -13,6 +13,7 @@ from robot_voice_assistant.arithmetic import find_arithmetic, spoken_calculation
 from robot_voice_assistant.assistant_response import NO_GESTURE, NO_MOTION, AssistantResponse, parse_assistant_response
 from robot_voice_assistant.llm_backends import ChatBackend
 from robot_voice_assistant.ollama_client import ChatMessage, build_response_schema
+from robot_voice_assistant.timing import StepTimer
 
 # Small models sometimes close the JSON string right before "'t" ("I don", "it isn").
 _TRUNCATED_CONTRACTION = re.compile(
@@ -265,6 +266,7 @@ class Conversation:
         self._example_messages = [message for example in examples for message in example.as_messages(walking)]
         self._schema = build_response_schema(self._gesture_names, self._motion_names if walking else None)
         self._history: list[ChatMessage] = []
+        self.last_timing: StepTimer | None = None  # how long each step of the latest answer took
 
     def reset(self) -> None:
         self._history = []
@@ -339,18 +341,25 @@ class Conversation:
 
     def respond(self, user_text: str) -> AssistantResponse:
         """Ask the language model; raises if it fails and the sentence is not a clear command."""
-        messages = self._messages(user_text)
+        timer = self.last_timing = StepTimer()
+        with timer.step("knowledge search"):
+            messages = self._messages(user_text)
         try:
-            response = self._ask(messages)
-            if looks_truncated(response.reply):
+            with timer.step("language model"):
                 response = self._ask(messages)
-            response = self._keep_short(response)
+            if looks_truncated(response.reply):
+                with timer.step("language model again (cut-off answer)"):
+                    response = self._ask(messages)
+            with timer.step("shortening"):
+                response = self._keep_short(response)
         except Exception:
-            offline = self._offline_response(user_text)
+            with timer.step("command matching"):
+                offline = self._offline_response(user_text)
             if offline is None:
                 raise
             return offline
-        response = self._fill_in_missed_command(user_text, response)
+        with timer.step("command matching"):
+            response = self._fill_in_missed_command(user_text, response)
         calculation = find_arithmetic(user_text)
         if calculation and re.fullmatch(r"[\d.,\s-]+\.?", response.reply):
             response = replace(response, reply=spoken_calculation(calculation))
@@ -362,5 +371,6 @@ class Conversation:
         ]
         self._history = self._history[-2 * self._history_turns :]
         if self._retriever is not None:
-            self._retriever.remember(user_text, response.reply)
+            with timer.step("memory write"):
+                self._retriever.remember(user_text, response.reply)
         return response

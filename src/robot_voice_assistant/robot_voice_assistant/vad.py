@@ -33,6 +33,7 @@ class EnergyVadSegmenter:
         self._threshold_ratio = threshold_ratio
         self._min_rms = min_rms
         self._end_silence_frames = max(1, round(end_silence_ms / frame_ms))
+        self._frame_ms = frame_ms
         self._min_speech_frames = max(1, round(min_speech_ms / frame_ms))
         self._max_utterance_samples = int(max_utterance_s * sample_rate)
         self._calibration_frames = max(1, round(calibration_ms / frame_ms))
@@ -51,6 +52,11 @@ class EnergyVadSegmenter:
     @property
     def is_calibrated(self) -> bool:
         return len(self._calibration_rms) >= self._calibration_frames
+
+    @property
+    def end_silence_s(self) -> float:
+        """How long after the speech stops an utterance is returned."""
+        return self._end_silence_frames * self._frame_ms / 1000
 
     @property
     def noise_floor(self) -> float:

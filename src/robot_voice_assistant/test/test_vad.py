@@ -1,3 +1,4 @@
+import pytest
 import numpy as np
 
 from robot_voice_assistant.vad import EnergyVadSegmenter
@@ -72,3 +73,7 @@ def test_reset_discards_partial_utterance() -> None:
     _feed(segmenter, _frames(0.001, 1.0, seed=1) + _frames(0.2, 0.6, seed=2))
     segmenter.reset()
     assert _feed(segmenter, _frames(0.001, 1.5, seed=3)) == []
+
+
+def test_reports_how_long_it_waits_for_silence_before_ending_an_utterance() -> None:
+    assert EnergyVadSegmenter(sample_rate=16000, frame_ms=30, end_silence_ms=700).end_silence_s == pytest.approx(0.69)  # 23 frames of 30 ms

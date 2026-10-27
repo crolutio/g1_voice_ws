@@ -324,3 +324,24 @@ def test_forget_memories_clears_history_and_long_term_memory() -> None:
     assert retriever.remembered == []
     conversation.respond("Hello")
     assert [m["role"] for m in backend.calls[1]] == ["system", "user"]
+
+
+def test_each_answer_records_how_long_its_steps_took() -> None:
+    backend = FakeBackend(['{"reply": "Jorge Colotto.", "gesture": "nod"}'])
+    conversation = Conversation(backend, "G1", GESTURES, examples=(), clock=lambda: FIXED_NOW, retriever=FakeRetriever())
+    assert conversation.last_timing is None
+    conversation.respond("Who is the CEO of Aideology?")
+    assert conversation.last_timing is not None
+    steps = [name for name, _ in conversation.last_timing.steps]
+    assert steps[:2] == ["knowledge search", "language model"]
+
+
+def test_timing_is_recorded_when_the_language_model_fails() -> None:
+    backend = FakeBackend([ConnectionError("groq and llama both down")])
+    conversation = Conversation(
+        backend, "G1", GESTURES, motion_descriptions=WALK_MOTIONS, examples=(), clock=lambda: FIXED_NOW,
+        command_matcher=FakeMatcher("walk_forward"),
+    )
+    conversation.respond("Walk forward")
+    assert conversation.last_timing is not None
+    assert [name for name, _ in conversation.last_timing.steps][:2] == ["knowledge search", "language model"]

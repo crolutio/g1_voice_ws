@@ -4,7 +4,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, SetEnvironmentVariable
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -12,6 +12,8 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 PACKAGE = "robot_voice_assistant"
 WHISPER_CACHE = os.path.expanduser("~/g1_voice_ws/models/hf")
+# Log lines show the local time to the millisecond, e.g. [INFO] [2026-10-27 10:15:02.123] [brain_node]: ...
+LOG_FORMAT = "[{severity}] [{date_time_with_ms}] [{name}]: {message}"
 
 
 def generate_launch_description() -> LaunchDescription:
@@ -28,6 +30,9 @@ def generate_launch_description() -> LaunchDescription:
 
     return LaunchDescription(
         [
+            SetEnvironmentVariable(
+                "RCUTILS_CONSOLE_OUTPUT_FORMAT", os.environ.get("RCUTILS_CONSOLE_OUTPUT_FORMAT", LOG_FORMAT)
+            ),
             DeclareLaunchArgument("config", default_value=default_config),
             DeclareLaunchArgument("use_microphone", default_value="true",
                                   description="false = type messages on /voice/transcript instead of speaking"),

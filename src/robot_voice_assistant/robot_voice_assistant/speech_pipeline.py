@@ -10,7 +10,9 @@ import queue
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Protocol
 
 import numpy as np
@@ -44,7 +46,11 @@ class Qwen3SpeechEngine:
         on_warning: Callable[[str], None] = lambda message: None,
     ) -> None:
         import torch
+        import transformers
         from qwen_tts import Qwen3TTSModel
+
+        # Hides "Setting `pad_token_id` to `eos_token_id`" before every spoken piece; errors are still shown.
+        transformers.logging.set_verbosity_error()
 
         self._model = Qwen3TTSModel.from_pretrained(
             model_name, device_map=device, dtype=torch.bfloat16, attn_implementation="sdpa"
@@ -148,6 +154,15 @@ def spoken_chunks(
 _DONE = object()
 
 
+@dataclass
+class SpeechTiming:
+    """How long speaking one reply took."""
+
+    first_audio_s: float | None = None  # until the first piece started playing (None: nothing was spoken)
+    pieces: list[tuple[int, float]] = field(default_factory=list)  # (characters, seconds to synthesize) per piece
+    total_s: float = 0.0  # until the last piece finished playing
+
+
 class SpeechPipeline:
     def __init__(
         self,
@@ -160,15 +175,25 @@ class SpeechPipeline:
         self._on_error = on_error
         self._lock = threading.Lock()  # one reply at a time
 
-    def speak(self, text: str, min_chars: int = 40) -> None:
-        """Synthesize and play ``text``; returns when the last sentence has been played."""
+    def speak(
+        self, text: str, min_chars: int = 40, on_first_audio: Callable[[float], None] = lambda seconds: None
+    ) -> SpeechTiming:
+        """Synthesize and play ``text``; returns when the last sentence has been played.
+
+        ``on_first_audio`` is called with the seconds until the first piece starts playing, as it starts.
+        """
         with self._lock:
+            started = time.perf_counter()
+            timing = SpeechTiming()
             ready: queue.Queue[object] = queue.Queue(maxsize=2)
 
             def synthesize_all() -> None:
                 for chunk in spoken_chunks(text, min_chars):
                     try:
-                        ready.put(self._engine.synthesize(chunk))
+                        piece_started = time.perf_counter()
+                        audio = self._engine.synthesize(chunk)
+                        timing.pieces.append((len(chunk), time.perf_counter() - piece_started))
+                        ready.put(audio)
                     except Exception as error:  # one bad sentence must not silence the rest
                         self._on_error(f"Could not synthesize {chunk!r}: {error}")
                 ready.put(_DONE)
@@ -176,5 +201,10 @@ class SpeechPipeline:
             producer = threading.Thread(target=synthesize_all, daemon=True)
             producer.start()
             while (audio := ready.get()) is not _DONE:
+                if timing.first_audio_s is None:
+                    timing.first_audio_s = time.perf_counter() - started
+                    on_first_audio(timing.first_audio_s)
                 self._player.play(audio, self._engine.sample_rate)
             producer.join()
+            timing.total_s = time.perf_counter() - started
+            return timing
