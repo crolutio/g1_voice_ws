@@ -149,3 +149,27 @@ def test_nothing_spoken_reports_no_first_audio() -> None:
     timing = SpeechPipeline(FakeEngine(), FakePlayer()).speak("   ")
     assert timing.first_audio_s is None
     assert timing.pieces == []
+
+
+def test_silence_is_trimmed_and_speech_sped_up_before_playing() -> None:
+    rate = 16000
+    t = np.arange(rate) / rate
+    voice = (np.sin(2 * np.pi * 200 * t) * 16000).astype(np.int16)
+    silence = np.zeros(rate // 2, dtype=np.int16)
+
+    class PaddedEngine:
+        sample_rate = rate
+
+        def synthesize(self, text: str) -> np.ndarray:
+            return np.concatenate([silence, voice, silence])
+
+    class RecordingPlayer:
+        played: list[int] = []
+
+        def play(self, audio: np.ndarray, sample_rate: int) -> None:
+            self.played.append(len(audio))
+
+    player = RecordingPlayer()
+    SpeechPipeline(PaddedEngine(), player, speaking_rate=1.25).speak("One sentence here.")
+    played_s = player.played[0] / rate
+    assert 0.75 < played_s < 0.95  # 2 s with silence -> about 1.17 s trimmed -> about 0.94 s at 1.25x

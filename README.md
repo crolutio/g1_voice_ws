@@ -555,6 +555,9 @@ In `src/robot_voice_assistant/robot_voice_assistant/conversation.py`:
 | `fast_decoding` | `true`                                        | Faster Qwen3-TTS decoding (CUDA graph); `false` = the library's own   |
 | `voice_model` | `~/g1_voice_ws/models/en_US-lessac-medium.onnx` | Piper voice file (only with `tts_engine: piper`)                      |
 | `player`      | `aplay`                                         | Program that plays the audio                                          |
+| `speaking_rate` | `1.1`                                         | How fast it speaks: `1.0` = the voice's own pace, `1.1` = normal conversation (about 165 words per minute), `1.2` = brisk; the pitch stays the same |
+
+Before playing, the silence Qwen3-TTS puts around every piece (about half a second each side) is trimmed to a short pause, and speech is sped up by `speaking_rate` without changing its pitch (`audio_effects.py`). Together that takes a reply from about 123 to about 167 words per minute; Whisper still understood every word at 1.3x. Style instructions such as "speak faster" make no difference to the 0.6B voice model.
 
 Replies are spoken in pieces: the first piece is kept short (one short sentence, or a long sentence cut at a comma or a word like "that"), and each next piece is generated while the previous one plays. The robot starts talking about 1.5 seconds after it has its answer.
 

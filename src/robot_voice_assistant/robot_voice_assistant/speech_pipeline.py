@@ -17,6 +17,7 @@ from typing import Protocol
 
 import numpy as np
 
+from robot_voice_assistant.audio_effects import change_speed, trim_silence
 from robot_voice_assistant.conversation import split_sentences
 
 
@@ -169,10 +170,13 @@ class SpeechPipeline:
         engine: SpeechEngine,
         player: AudioPlayer,
         on_error: Callable[[str], None] = lambda message: None,
+        speaking_rate: float = 1.0,
     ) -> None:
+        """``speaking_rate``: how much faster than the engine to speak (1.15 = 15% faster, same pitch)."""
         self._engine = engine
         self._player = player
         self._on_error = on_error
+        self._speaking_rate = speaking_rate
         self._lock = threading.Lock()  # one reply at a time
 
     def speak(
@@ -192,8 +196,11 @@ class SpeechPipeline:
                     try:
                         piece_started = time.perf_counter()
                         audio = self._engine.synthesize(chunk)
+                        rate = self._engine.sample_rate
+                        audio = change_speed(trim_silence(audio, rate), rate, self._speaking_rate)
                         timing.pieces.append((len(chunk), time.perf_counter() - piece_started))
-                        ready.put(audio)
+                        if len(audio):
+                            ready.put(audio)
                     except Exception as error:  # one bad sentence must not silence the rest
                         self._on_error(f"Could not synthesize {chunk!r}: {error}")
                 ready.put(_DONE)

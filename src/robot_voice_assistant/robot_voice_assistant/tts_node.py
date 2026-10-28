@@ -40,10 +40,16 @@ class TtsNode(Node):
         self.declare_parameter("voice_model", DEFAULT_PIPER_VOICE)  # Piper voice file
         self.declare_parameter("use_cuda", False)  # Piper only
         self.declare_parameter("player", "aplay")
+        # 1.0 = the voice's own pace (about 150 words per minute once the silence is trimmed); 1.1 = normal
+        # conversation (about 165); the pitch stays the same
+        self.declare_parameter("speaking_rate", 1.1)
 
         engine = self._load_engine()
         self._pipeline = SpeechPipeline(
-            engine, AplayPlayer(str(self.get_parameter("player").value)), on_error=self.get_logger().error
+            engine,
+            AplayPlayer(str(self.get_parameter("player").value)),
+            on_error=self.get_logger().error,
+            speaking_rate=float(self.get_parameter("speaking_rate").value),
         )
         # (reply text, wall time it arrived, wall time the person stopped speaking or None)
         self._replies: queue.Queue[tuple[str, float, float | None]] = queue.Queue()

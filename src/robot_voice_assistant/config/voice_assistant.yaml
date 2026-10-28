@@ -51,6 +51,7 @@ tts_node:
     instruct: ""              # style instruction, e.g. "Speak in a warm, friendly tone."
     fast_decoding: true       # Qwen3-TTS about twice as fast (CUDA graph); false = the library's own decoding
     player: aplay
+    speaking_rate: 1.1        # 1.0 = the voice's own pace, 1.1 = normal conversation, 1.2 = brisk (same pitch)
 
 gesture_node:
   ros__parameters:
