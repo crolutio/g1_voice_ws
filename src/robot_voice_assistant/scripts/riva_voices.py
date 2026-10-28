@@ -4,7 +4,7 @@ Needs the NVIDIA_API_KEY environment variable (create a key on build.nvidia.com)
 environment:
 
     python riva_voices.py --list
-    python riva_voices.py --voice Magpie-Multilingual.EN-US.Aria --say "Hello, I am R1." --out aria.wav
+    python riva_voices.py --voice Magpie-Multilingual.EN-US.Jason.Happy --say "Hello, I am R1." --out jason.wav
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from robot_voice_assistant.speech_pipeline import (  # noqa: E402
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--list", action="store_true", help="list the available voices")
-    parser.add_argument("--voice", default="Magpie-Multilingual.EN-US.Aria")
+    parser.add_argument("--voice", default="Magpie-Multilingual.EN-US.Jason.Happy")
     parser.add_argument("--language", default="en-US")
     parser.add_argument("--say", default="Hello! I am R1, a robot made by Unitree. How can I help you today?")
     parser.add_argument("--out", default="riva_sample.wav")

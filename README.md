@@ -133,7 +133,7 @@ echo 'export NVIDIA_API_KEY="nvapi-your-key-here"' >> ~/.bashrc && source ~/.bas
 Without the key, or when NVIDIA cannot be reached, the robot speaks with Qwen3-TTS on this computer instead (after a failure it tries NVIDIA again 30 seconds later). The log says which voice is used:
 
 ```text
-[tts_node]: TTS ready (NVIDIA Riva, voice Magpie-Multilingual.EN-US.Aria; local Qwen3-TTS if unreachable).
+[tts_node]: TTS ready (NVIDIA Riva, voice Magpie-Multilingual.EN-US.Jason.Happy; local Qwen3-TTS if unreachable).
 [tts_node]: NVIDIA_API_KEY is not set, so the Riva voice is off; using Qwen3-TTS.
 ```
 
@@ -142,7 +142,7 @@ List the voices and save a sample to listen to:
 ```bash
 source ~/g1_voice_ws/.venv/bin/activate
 python ~/g1_voice_ws/src/robot_voice_assistant/scripts/riva_voices.py --list
-python ~/g1_voice_ws/src/robot_voice_assistant/scripts/riva_voices.py --voice Magpie-Multilingual.EN-US.Aria --out aria.wav && aplay aria.wav
+python ~/g1_voice_ws/src/robot_voice_assistant/scripts/riva_voices.py --voice Magpie-Multilingual.EN-US.Jason.Happy --out jason.wav && aplay jason.wav
 ```
 
 Pick one with `riva_voice` in `config/voice_assistant.yaml`. A local Riva server (nothing sent to NVIDIA) needs the NVIDIA container toolkit for Docker, which needs administrator rights to install.
@@ -573,10 +573,10 @@ In `src/robot_voice_assistant/robot_voice_assistant/conversation.py`:
 | Setting       | Default                                         | Meaning                                                               |
 | ------------- | ----------------------------------------------- | --------------------------------------------------------------------- |
 | `tts_engine`  | `riva`                                          | `riva` (NVIDIA Riva voice in the cloud, Qwen3-TTS as fallback), `qwen3` (Qwen3-TTS on this computer) or `piper` (instant, more robotic) |
-| `riva_voice`  | `Magpie-Multilingual.EN-US.Aria`                | Riva voice; list them with `scripts/riva_voices.py --list`            |
+| `riva_voice`  | `Magpie-Multilingual.EN-US.Jason.Happy`         | Riva voice and style; English voices Mia, Jason, Aria, Leo, Sofia, Ray, with styles such as `.Calm`, `.Neutral`, `.Happy`; list them with `scripts/riva_voices.py --list` |
 | `riva_language` | `en-US`                                       | Language of the Riva voice                                            |
 | `riva_sample_rate` | `44100`                                    | Sample rate requested from Riva                                       |
-| `riva_speaking_rate` | `1.0`                                    | Speed for the Riva voice (`speaking_rate` is for Qwen3-TTS)           |
+| `riva_speaking_rate` | `0.9`                                    | Speed for the Riva voice (`speaking_rate` is for Qwen3-TTS); Jason.Happy is about 195 words per minute at 1.0 and 178 at 0.9 |
 | `qwen_model`  | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`          | Qwen3-TTS model                                                       |
 | `speaker`     | `ryan`                                          | English voices: `aiden`, `dylan`, `eric`, `ryan`                      |
 | `language`    | `english`                                       | Language of the replies                                               |

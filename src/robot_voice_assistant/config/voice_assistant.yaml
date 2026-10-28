@@ -48,10 +48,10 @@ tts_node:
     # is sent to NVIDIA), falling back to Qwen3-TTS when unreachable or without a key;
     # qwen3: Qwen3-TTS on this computer; piper: very fast, more robotic
     tts_engine: riva
-    riva_voice: Magpie-Multilingual.EN-US.Aria   # list voices: see README "NVIDIA Riva voices"
+    riva_voice: Magpie-Multilingual.EN-US.Jason.Happy   # list voices: see README "NVIDIA Riva voices"
     riva_language: en-US
     riva_sample_rate: 44100
-    riva_speaking_rate: 1.0   # Riva voices already speak at a normal pace
+    riva_speaking_rate: 0.9   # Jason.Happy speaks about 195 words/min; 0.9 gives about 178 (same pitch)
     qwen_model: Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
     speaker: ryan             # aiden, dylan, eric, ryan (English); ono_anna, serena, sohee, uncle_fu, vivian
     language: english
