@@ -351,32 +351,34 @@ The simulation does not stop an arm from passing through the robot's own head or
 
 ### How well it walks
 
-Measured with the final policy (iteration 1500) in terminal 1's scene, headless at 100% of real time. The robot did not fall in any test: the pelvis always stayed between 0.70 and 0.73 m (0.72 m when standing).
+The robot walks with bent knees: they are bent about 25 degrees when standing and swing between about 21 and 52 degrees with every step at 1 m/s, on both legs. (The first policy locked both knees straight against their -10 degree stop and shuffled with its hips and ankles; see [Training the walking policy](#11-training-the-walking-policy).)
+
+Measured with the final policy (`2026-10-28_15-31-18/model_2248.pt`) in terminal 1's scene, headless at 100% of real time. The robot did not fall in any test: the pelvis always stayed between 0.69 and 0.77 m (0.73 m when standing).
 
 Named motions, as used by the voice assistant:
 
 | Motion                      | Target      | Measured                                 |
 | --------------------------- | ----------- | ---------------------------------------- |
-| `walk_forward`              | 1.0 m       | 1.07 to 1.08 m, heading within 3 degrees |
-| `walk_backward`             | 0.5 m       | 0.40 m                                   |
-| `turn_left`                 | 90 degrees  | 83 degrees                               |
-| `turn_right`                | 90 degrees  | 84 degrees                               |
-| `turn_around`               | 180 degrees | 190 degrees                              |
-| `walk_forward` while waving | 1.0 m       | 1.07 m, steady                           |
-| `keep_walking`, then `stop` | until told  | walked 2.4 m, then stopped               |
+| `walk_forward`              | 1.0 m       | 1.05 m, heading within 2 degrees         |
+| `walk_backward`             | 0.5 m       | 0.45 m                                   |
+| `turn_left`                 | 90 degrees  | 80 degrees                               |
+| `turn_right`                | 90 degrees  | 93 degrees                               |
+| `turn_around`               | 180 degrees | 169 degrees                              |
+| `walk_forward` while waving | 1.0 m       | 1.16 m, steady                           |
+| `keep_walking`, then `stop` | until told  | walked 2.45 m, then stopped              |
 
 Speed commands on `/cmd_vel` (measured over 4 seconds once walking):
 
-| Command                            | Measured                                           |
-| ---------------------------------- | -------------------------------------------------- |
-| Forward 1.0 / 0.6 / 0.3 m/s        | 0.85 / 0.52 / 0.24 m/s                             |
-| Backward 0.3 m/s                   | 0.20 m/s                                           |
-| Turn left 0.8 / 0.4 rad/s          | 0.97 / 0.52 rad/s                                  |
-| Turn right 0.8 / 0.4 rad/s         | 0.88 / 0.29 rad/s                                  |
-| Forward 0.5 m/s and turn 0.5 rad/s | 0.45 m/s and 0.46 rad/s                            |
-| Sideways 0.25 m/s (left / right)   | 0.07 / 0.00 m/s: the policy does not walk sideways |
+| Command                            | Measured                         |
+| ---------------------------------- | -------------------------------- |
+| Forward 1.0 / 0.6 / 0.3 m/s        | 0.93 / 0.53 / 0.26 m/s           |
+| Backward 0.3 m/s                   | 0.25 m/s                         |
+| Turn left 0.8 / 0.4 rad/s          | 0.70 / 0.20 rad/s                |
+| Turn right 0.8 / 0.4 rad/s         | 0.87 / 0.38 rad/s                |
+| Forward 0.5 m/s and turn 0.5 rad/s | 0.42 m/s and 0.47 rad/s          |
+| Sideways 0.25 m/s (left / right)   | 0.20 / 0.19 m/s                  |
 
-The robot keeps moving for a moment after the command stops (about 0.3 m after walking at 0.5 m/s, 13 to 22 degrees after a turn), so `motion_node` stops early by the distance covered in 0.5 s (walking) or the angle turned in 0.33 s (turning). Side steps are not offered, because the policy does not walk sideways; asked to step sideways, the robot says it cannot yet and offers to turn instead.
+After a stop from 0.5 m/s the robot comes to rest within 0.21 m and stands still. Slow turns from standing (0.4 rad/s) are weak, so the voice motions turn at 0.8 rad/s. `motion_node` stops early by the distance covered in 0.5 s (walking) or the angle turned in 0.33 s (turning). Side steps are not offered as voice motions yet: the policy now steps sideways at about 0.2 m/s, but this has not been tested as a motion.
 
 ### Commanding the robot directly
 
@@ -647,7 +649,14 @@ The walking policy was trained with Isaac Lab 3.0 on the task `R1-Walk-Flat`, de
 - the Unitree R1 from `robot_cfg.py` (converted from Unitree's URDF; motor limits from the URDF);
 - PhysX physics, like the scene in terminal 1;
 - the policy controls the 12 leg joints; the waist, arms and head are moved through the gesture poses during training, so the robot learns to keep its balance while it gestures;
-- forward, backward, sideways and turning speed commands, and standing still (the policy did not learn to walk sideways; see [How well it walks](#how-well-it-walks)).
+- forward, backward, sideways and turning speed commands, and standing still (a new command every 4 to 8 seconds, so it practises starting and stopping);
+- rewards for walking with bent knees (`reward_math.py`, tested in `training/tests/`): resting a knee on its -10 degree stop or keeping it straighter than 11 degrees costs reward, and so does a swinging foot lifted less than 8 cm above the standing foot; while told to stand still, any body motion and leaving the standing pose cost reward.
+
+Why the knee rewards: the first policy (`2026-10-26_15-04-02`) locked both knees straight against their stop, where the joint limit carries the weight for free, and shuffled with its hips and ankles. The final policy was trained for 1500 iterations with the knee and foot rewards, then 750 more with the stand-still rewards (without them it crept on at 0.25 m/s for seconds after a stop). Test the reward maths with:
+
+```bash
+~/g1_voice_ws/.venv/bin/python -m pytest -q ~/g1_voice_ws/training/tests
+```
 
 To train again (about an hour on the RTX 4090 Laptop GPU with 4096 robots in parallel and the GPU busy half of the time):
 

@@ -5,6 +5,8 @@ Based on Isaac Lab's Isaac-Velocity-Flat-G1 task, with these changes:
 - PhysX physics, as in the voice assistant scene;
 - the policy controls only the 12 leg joints; the waist, arms and head are free for gestures and are
   moved through the gesture poses during training, so the policy learns to balance while gesturing;
+- rewards for bent knees and lifted feet (the first policy walked stiff-legged on its knee stops), and for
+  standing still when told to stop;
 - direct turning-rate commands (no heading control) and more standing-still commands, matching voice
   commands such as "walk forward", "turn left" and "stop".
 """
@@ -14,6 +16,7 @@ from __future__ import annotations
 import os
 
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass, replace
 
@@ -63,6 +66,42 @@ class R1WalkFlatEnvCfg(G1FlatEnvCfg):
         self.rewards.joint_deviation_fingers = None
         self.rewards.joint_deviation_torso = None
         self.rewards.dof_acc_l2.params["asset_cfg"] = SceneEntityCfg("robot", joint_names=LEG_JOINTS)
+
+        # rewards: walk with bent knees and lifted feet. Without these the first policy locked its knees
+        # straight on their -10 degree stop (free support, no penalty) and shuffled with hips and ankles.
+        self.rewards.dof_pos_limits.params["asset_cfg"] = SceneEntityCfg(
+            "robot", joint_names=[".*_ankle_pitch_joint", ".*_ankle_roll_joint", ".*_knee_joint"]
+        )
+        self.rewards.knees_too_straight = RewTerm(
+            func=walk_mdp.knees_too_straight,
+            weight=-1.0,
+            params={"min_bend": 0.2, "asset_cfg": SceneEntityCfg("robot", joint_names=".*_knee_joint")},
+        )
+        self.rewards.swing_foot_too_low = RewTerm(
+            func=walk_mdp.swing_foot_too_low,
+            weight=-20.0,
+            params={
+                "target_height": 0.08,
+                "command_name": "base_velocity",
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_ankle_roll_link"),
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*_ankle_roll_link"),
+            },
+        )
+
+        # rewards: stand still when told to stop. The knee-bending policy kept creeping forward at about
+        # 0.25 m/s for seconds after a stop (locked straight knees had stood still by themselves).
+        self.rewards.drifting_while_standing = RewTerm(
+            func=walk_mdp.drifting_while_standing,
+            weight=-2.0,
+            params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot")},
+        )
+        self.rewards.stand_still = RewTerm(
+            func=mdp.stand_still_joint_deviation_l1,
+            weight=-0.2,
+            params={"command_name": "base_velocity", "asset_cfg": SceneEntityCfg("robot", joint_names=LEG_JOINTS)},
+        )
+        # more starts and stops: a new command every 4 to 8 s instead of every 10 s
+        command.resampling_time_range = (4.0, 8.0)
 
         # events: gesture-like arm and waist motion
         self.events.reset_upper_body = EventTerm(

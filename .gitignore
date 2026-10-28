@@ -12,7 +12,8 @@ build/
 install/
 log/
 
-# Training: keep only the final R1 walking policy and its settings, not every checkpoint and log
+# Training: keep only the walking policies and their settings, not every checkpoint and log
+# the first policy (straight knees), kept for comparison
 training/logs/**
 !training/logs/
 !training/logs/rsl_rl/
@@ -21,6 +22,11 @@ training/logs/**
 !training/logs/rsl_rl/r1_walk_flat/2026-10-26_15-04-02/model_1499.pt
 !training/logs/rsl_rl/r1_walk_flat/2026-10-26_15-04-02/params/
 !training/logs/rsl_rl/r1_walk_flat/2026-10-26_15-04-02/params/**
+# the final policy: knee-bending walking (1500 iterations), fine-tuned to stand still on stop (750 more)
+!training/logs/rsl_rl/r1_walk_flat/2026-10-28_15-31-18/
+!training/logs/rsl_rl/r1_walk_flat/2026-10-28_15-31-18/model_2248.pt
+!training/logs/rsl_rl/r1_walk_flat/2026-10-28_15-31-18/params/
+!training/logs/rsl_rl/r1_walk_flat/2026-10-28_15-31-18/params/**
 training/*.log
 training/outputs/
 
