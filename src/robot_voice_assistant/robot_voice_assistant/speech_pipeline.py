@@ -104,7 +104,7 @@ class RivaSpeechEngine:
     def __init__(
         self,
         api_key: str = "",
-        voice: str = "Magpie-Multilingual.EN-US.Jason.Happy",
+        voice: str = "Magpie-Multilingual.EN-US.Ray",
         language: str = "en-US",
         sample_rate: int = 44100,
         server: str = RIVA_CLOUD_SERVER,

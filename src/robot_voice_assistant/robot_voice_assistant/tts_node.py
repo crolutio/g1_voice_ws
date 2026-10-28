@@ -36,7 +36,7 @@ class TtsNode(Node):
         # riva: NVIDIA Riva voices in NVIDIA's cloud (needs NVIDIA_API_KEY), with Qwen3-TTS when unreachable;
         # qwen3: Qwen3-TTS on this computer; piper: very fast local voice
         self.declare_parameter("tts_engine", "riva")
-        self.declare_parameter("riva_voice", "Magpie-Multilingual.EN-US.Jason.Happy")
+        self.declare_parameter("riva_voice", "Magpie-Multilingual.EN-US.Ray")
         self.declare_parameter("riva_language", "en-US")
         self.declare_parameter("riva_sample_rate", 44100)
         self.declare_parameter("riva_speaking_rate", 0.9)  # Riva voices speak fast (about 200 words/min)
