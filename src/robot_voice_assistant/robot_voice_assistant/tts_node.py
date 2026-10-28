@@ -20,6 +20,8 @@ from robot_voice_assistant.speech_pipeline import (
     PiperSpeechEngine,
     Qwen3SpeechEngine,
     SpeechEngine,
+    FallbackSpeechEngine,
+    RivaSpeechEngine,
     SpeechPipeline,
     SpeechTiming,
 )
@@ -31,7 +33,13 @@ DEFAULT_PIPER_VOICE = os.path.expanduser("~/g1_voice_ws/models/en_US-lessac-medi
 class TtsNode(Node):
     def __init__(self) -> None:
         super().__init__("tts_node")
-        self.declare_parameter("tts_engine", "qwen3")  # qwen3 or piper
+        # riva: NVIDIA Riva voices in NVIDIA's cloud (needs NVIDIA_API_KEY), with Qwen3-TTS when unreachable;
+        # qwen3: Qwen3-TTS on this computer; piper: very fast local voice
+        self.declare_parameter("tts_engine", "riva")
+        self.declare_parameter("riva_voice", "Magpie-Multilingual.EN-US.Aria")
+        self.declare_parameter("riva_language", "en-US")
+        self.declare_parameter("riva_sample_rate", 44100)
+        self.declare_parameter("riva_speaking_rate", 1.0)  # Riva voices already speak at a normal pace
         self.declare_parameter("qwen_model", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
         self.declare_parameter("speaker", "ryan")
         self.declare_parameter("language", "english")
@@ -44,12 +52,12 @@ class TtsNode(Node):
         # conversation (about 165); the pitch stays the same
         self.declare_parameter("speaking_rate", 1.1)
 
-        engine = self._load_engine()
+        engine, speaking_rate = self._load_engine()
         self._pipeline = SpeechPipeline(
             engine,
             AplayPlayer(str(self.get_parameter("player").value)),
             on_error=self.get_logger().error,
-            speaking_rate=float(self.get_parameter("speaking_rate").value),
+            speaking_rate=speaking_rate,
         )
         # (reply text, wall time it arrived, wall time the person stopped speaking or None)
         self._replies: queue.Queue[tuple[str, float, float | None]] = queue.Queue()
@@ -59,8 +67,38 @@ class TtsNode(Node):
         self.create_subscription(String, "/voice/reply", self._on_reply, 10)
         threading.Thread(target=self._speak_loop, daemon=True).start()
 
-    def _load_engine(self) -> SpeechEngine:
-        if self.get_parameter("tts_engine").value == "qwen3":
+    def _load_engine(self) -> tuple[SpeechEngine, float]:
+        """The voice engine and the speaking rate to play it at."""
+        choice = str(self.get_parameter("tts_engine").value)
+        qwen_rate = float(self.get_parameter("speaking_rate").value)
+        if choice == "riva":
+            api_key = os.environ.get("NVIDIA_API_KEY", "")
+            if not api_key:
+                self.get_logger().warn("NVIDIA_API_KEY is not set, so the Riva voice is off; using Qwen3-TTS.")
+            else:
+                riva_voice = str(self.get_parameter("riva_voice").value)
+                riva = RivaSpeechEngine(
+                    api_key,
+                    voice=riva_voice,
+                    language=str(self.get_parameter("riva_language").value),
+                    sample_rate=int(self.get_parameter("riva_sample_rate").value),
+                )
+                riva_rate = float(self.get_parameter("riva_speaking_rate").value)
+                local, _ = self._load_local_engine("qwen3", qwen_rate)
+                engine = FallbackSpeechEngine(
+                    riva,
+                    local,
+                    fallback_speed=qwen_rate / riva_rate,
+                    on_fallback=lambda reason: self.get_logger().warn(
+                        f"Riva voice unavailable ({reason}); speaking with the local voice for 30 s."
+                    ),
+                )
+                self.get_logger().info(f"TTS ready (NVIDIA Riva, voice {riva_voice}; local Qwen3-TTS if unreachable).")
+                return engine, riva_rate
+        return self._load_local_engine("qwen3" if choice == "riva" else choice, qwen_rate)
+
+    def _load_local_engine(self, choice: str, qwen_rate: float) -> tuple[SpeechEngine, float]:
+        if choice == "qwen3":
             try:
                 engine = Qwen3SpeechEngine(
                     str(self.get_parameter("qwen_model").value),
@@ -72,12 +110,12 @@ class TtsNode(Node):
                 )
                 decoding = ", fast decoding" if engine.fast_decoding else ""
                 self.get_logger().info(f"TTS ready (Qwen3-TTS, voice {self.get_parameter('speaker').value}{decoding}).")
-                return engine
+                return engine, qwen_rate
             except Exception as error:  # e.g. not enough GPU memory
                 self.get_logger().error(f"Could not load Qwen3-TTS ({error}); using Piper instead.")
         engine = PiperSpeechEngine(str(self.get_parameter("voice_model").value), bool(self.get_parameter("use_cuda").value))
         self.get_logger().info(f"TTS ready (Piper, {os.path.basename(str(self.get_parameter('voice_model').value))}).")
-        return engine
+        return engine, 1.0
 
     def _on_speech_ended(self, msg: Float64) -> None:
         self._speech_ended = msg.data

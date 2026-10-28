@@ -4,7 +4,7 @@ A simulated **Unitree R1 EDU** humanoid robot (26 degrees of freedom, no hands) 
 
 - **Listens** to your microphone and turns speech into text (Whisper large-v3-turbo, on the GPU).
 - **Thinks** of an answer with Groq's `qwen/qwen3.8-27b` (in the cloud), falling back to a local `llama3.1:8b` when Groq is unavailable.
-- **Speaks** the answer out loud (Qwen3-TTS).
+- **Speaks** the answer out loud with an NVIDIA Riva voice (Magpie TTS in NVIDIA's cloud), or with Qwen3-TTS on this computer when there is no NVIDIA key or no internet.
 - **Moves**: gestures with its arms, waist and head while it talks, and walks forward and backward and turns when asked.
 - **Knows and remembers**: Qwen3-Embedding searches a folder of documents for each question, remembers earlier conversations, and recognises clear commands by meaning.
 
@@ -95,7 +95,7 @@ This workspace was set up and tested with:
 | Walking policy     | `~/g1_voice_ws/training/logs/rsl_rl/r1_walk_flat/` (see [Training the walking policy](#11-training-the-walking-policy)) |
 | Ollama             | `~/.local/ollama`, with the fallback model `llama3.1:8b`                                                                |
 | Groq               | An API key in the `GROQ_API_KEY` environment variable (optional)                                                        |
-| Python environment | `~/g1_voice_ws/.venv` (faster-whisper, qwen-tts, sentence-transformers, PyTorch, colcon)                                |
+| Python environment | `~/g1_voice_ws/.venv` (faster-whisper, qwen-tts, nvidia-riva-client, sentence-transformers, PyTorch, colcon)                                |
 | Models             | `~/g1_voice_ws/models/hf` (Whisper large-v3-turbo, Qwen3-TTS 0.6B, Qwen3-Embedding 0.6B)                                |
 | Audio tools        | `arecord` and `aplay` (package `alsa-utils`, installed by default on Ubuntu)                                            |
 | Internet           | For Groq, and when Isaac Sim starts                                                                                     |
@@ -121,6 +121,31 @@ echo 'export GROQ_API_KEY="your-key-here"' >> ~/.bashrc && source ~/.bashrc
 ```
 
 Open new terminals after this, so they see the key. Without a key, the robot uses the local model only.
+
+### NVIDIA Riva voices
+
+The robot speaks with NVIDIA Riva's Magpie TTS voices, served by NVIDIA on [build.nvidia.com](https://build.nvidia.com/nvidia/magpie-tts-multilingual). Create a free API key there (sign in, open the model, "Get API Key") and set it once, like the Groq key:
+
+```bash
+echo 'export NVIDIA_API_KEY="nvapi-your-key-here"' >> ~/.bashrc && source ~/.bashrc
+```
+
+Without the key, or when NVIDIA cannot be reached, the robot speaks with Qwen3-TTS on this computer instead (after a failure it tries NVIDIA again 30 seconds later). The log says which voice is used:
+
+```text
+[tts_node]: TTS ready (NVIDIA Riva, voice Magpie-Multilingual.EN-US.Aria; local Qwen3-TTS if unreachable).
+[tts_node]: NVIDIA_API_KEY is not set, so the Riva voice is off; using Qwen3-TTS.
+```
+
+List the voices and save a sample to listen to:
+
+```bash
+source ~/g1_voice_ws/.venv/bin/activate
+python ~/g1_voice_ws/src/robot_voice_assistant/scripts/riva_voices.py --list
+python ~/g1_voice_ws/src/robot_voice_assistant/scripts/riva_voices.py --voice Magpie-Multilingual.EN-US.Aria --out aria.wav && aplay aria.wav
+```
+
+Pick one with `riva_voice` in `config/voice_assistant.yaml`. A local Riva server (nothing sent to NVIDIA) needs the NVIDIA container toolkit for Docker, which needs administrator rights to install.
 
 ### Choosing the Groq model
 
@@ -547,7 +572,11 @@ In `src/robot_voice_assistant/robot_voice_assistant/conversation.py`:
 
 | Setting       | Default                                         | Meaning                                                               |
 | ------------- | ----------------------------------------------- | --------------------------------------------------------------------- |
-| `tts_engine`  | `qwen3`                                         | `qwen3` (Qwen3-TTS, natural voice) or `piper` (instant, more robotic) |
+| `tts_engine`  | `riva`                                          | `riva` (NVIDIA Riva voice in the cloud, Qwen3-TTS as fallback), `qwen3` (Qwen3-TTS on this computer) or `piper` (instant, more robotic) |
+| `riva_voice`  | `Magpie-Multilingual.EN-US.Aria`                | Riva voice; list them with `scripts/riva_voices.py --list`            |
+| `riva_language` | `en-US`                                       | Language of the Riva voice                                            |
+| `riva_sample_rate` | `44100`                                    | Sample rate requested from Riva                                       |
+| `riva_speaking_rate` | `1.0`                                    | Speed for the Riva voice (`speaking_rate` is for Qwen3-TTS)           |
 | `qwen_model`  | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`          | Qwen3-TTS model                                                       |
 | `speaker`     | `ryan`                                          | English voices: `aiden`, `dylan`, `eric`, `ryan`                      |
 | `language`    | `english`                                       | Language of the replies                                               |
@@ -809,6 +838,7 @@ cd ~/g1_voice_ws/src/robot_voice_assistant && ../../.venv/bin/python scripts/bui
 ### Privacy
 
 - **With a Groq key, what you say to the robot is sent to Groq** (everything said during a conversation, from the wake word until "goodbye"), together with the relevant knowledge passages and memories. Without a key, or with `use_groq: false`, everything runs on this computer.
-- Speech recognition, the voice, embeddings and the fallback model always run on this computer.
+- **With an NVIDIA key, the robot's replies (not what you say) are sent to NVIDIA** to be spoken with the Riva voice. Without a key, or with `tts_engine: qwen3`, the voice runs on this computer.
+- Speech recognition, embeddings and the fallback model always run on this computer.
 - The microphone is only open while `stt_node` runs and is released when you press `Ctrl+C`, close the terminal, or the node crashes. Speech outside a conversation is dropped immediately and is not logged, stored or sent anywhere. **During a conversation the robot answers everything it hears, including other people in the room**, so end it with "goodbye" when you are done, or set `conversation_idle_timeout_s`.
 - Long-term memory stores your conversations in `~/.local/share/robot_voice_assistant/memory.jsonl` on this computer. Turn it off with `use_memory: false`, or delete it with `/voice/forget`.

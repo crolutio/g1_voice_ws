@@ -1,4 +1,4 @@
-"""Text-to-speech engines (Qwen3-TTS, Piper) and a pipeline that speaks a reply sentence by sentence.
+"""Text-to-speech engines (Qwen3-TTS, Piper, NVIDIA Riva) and a pipeline that speaks a reply sentence by sentence.
 
 The next sentence is synthesized while the current one plays, so the robot starts talking after the
 first sentence instead of after the whole reply.
@@ -91,6 +91,101 @@ class PiperSpeechEngine:
 
     def synthesize(self, text: str) -> np.ndarray:
         return np.concatenate([chunk.audio_int16_array for chunk in self._voice.synthesize(text)])
+
+
+# NVIDIA's hosted Magpie TTS (Riva) on build.nvidia.com
+RIVA_CLOUD_SERVER = "grpc.nvcf.nvidia.com:443"
+RIVA_MAGPIE_FUNCTION_ID = "877104f7-e885-42b9-8de8-f6e4c6303969"
+
+
+class RivaSpeechEngine:
+    """NVIDIA Riva voices (Magpie TTS) in NVIDIA's cloud; the API key comes from NVIDIA_API_KEY."""
+
+    def __init__(
+        self,
+        api_key: str = "",
+        voice: str = "Magpie-Multilingual.EN-US.Aria",
+        language: str = "en-US",
+        sample_rate: int = 44100,
+        server: str = RIVA_CLOUD_SERVER,
+        function_id: str = RIVA_MAGPIE_FUNCTION_ID,
+        timeout_s: float = 8.0,
+        service: object | None = None,
+    ) -> None:
+        """``service`` replaces the gRPC connection (for tests)."""
+        if service is None:
+            import riva.client
+
+            auth = riva.client.Auth(
+                uri=server,
+                use_ssl=True,
+                metadata_args=[["function-id", function_id], ["authorization", f"Bearer {api_key}"]],
+            )
+            service = riva.client.SpeechSynthesisService(auth)
+        self._service = service
+        self._voice, self._language = voice, language
+        self._timeout_s = timeout_s
+        self.sample_rate = sample_rate
+
+    def synthesize(self, text: str) -> np.ndarray:
+        result: dict[str, object] = {}
+
+        def call() -> None:
+            try:
+                result["response"] = self._service.synthesize(  # type: ignore[attr-defined]
+                    text, voice_name=self._voice, language_code=self._language, sample_rate_hz=self.sample_rate
+                )
+            except Exception as error:
+                result["error"] = error
+
+        worker = threading.Thread(target=call, daemon=True)  # the client call has no deadline of its own
+        worker.start()
+        worker.join(self._timeout_s)
+        if worker.is_alive():
+            raise TimeoutError(f"NVIDIA Riva did not answer within {self._timeout_s:.0f} s")
+        if "error" in result:
+            raise result["error"]  # type: ignore[misc]
+        return np.frombuffer(result["response"].audio, dtype=np.int16).copy()  # type: ignore[attr-defined]
+
+
+class FallbackSpeechEngine:
+    """Speaks with ``primary`` (the cloud voice); when it fails, with ``fallback`` (a local voice).
+
+    The fallback's audio is resampled to the primary's sample rate and sped up by ``fallback_speed``, so
+    the pipeline can treat both the same. After a failure the primary is skipped for ``cooldown_s``.
+    """
+
+    def __init__(
+        self,
+        primary: SpeechEngine,
+        fallback: SpeechEngine,
+        fallback_speed: float = 1.0,
+        cooldown_s: float = 30.0,
+        on_fallback: Callable[[str], None] = lambda message: None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._primary, self._fallback = primary, fallback
+        self._fallback_speed = fallback_speed
+        self._cooldown_s = cooldown_s
+        self._on_fallback = on_fallback
+        self._clock = clock
+        self._skip_primary_until = float("-inf")
+        self.sample_rate = primary.sample_rate
+
+    def synthesize(self, text: str) -> np.ndarray:
+        if self._clock() >= self._skip_primary_until:
+            try:
+                return self._primary.synthesize(text)
+            except Exception as error:
+                self._skip_primary_until = self._clock() + self._cooldown_s
+                self._on_fallback(f"{type(error).__name__}: {error}")
+        audio = self._fallback.synthesize(text)
+        audio = change_speed(trim_silence(audio, self._fallback.sample_rate), self._fallback.sample_rate,
+                             self._fallback_speed)
+        if self._fallback.sample_rate == self.sample_rate or not len(audio):
+            return audio
+        positions = np.arange(0, len(audio), self._fallback.sample_rate / self.sample_rate)
+        return np.interp(positions, np.arange(len(audio)), audio).astype(np.int16)
 
 
 class AplayPlayer:
