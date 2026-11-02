@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -26,6 +27,13 @@ def vocabulary_prompt(vocabulary: Sequence[str]) -> str:
     return f"{', '.join(vocabulary)}." if vocabulary else ""
 
 
+def is_prompt_echo(text: str, vocabulary: Sequence[str]) -> bool:
+    """True when ``text`` is only words from the prompt (Whisper copied the prompt instead of the speech)."""
+    words = re.findall(r"[a-z0-9']+", text.lower())
+    prompt_words = set(re.findall(r"[a-z0-9']+", " ".join(vocabulary).lower()))
+    return bool(words) and all(word in prompt_words for word in words)
+
+
 class Transcriber:
     def __init__(
         self,
@@ -37,6 +45,7 @@ class Transcriber:
     ) -> None:
         """``model`` is a faster_whisper.WhisperModel. ``vocabulary_as``: "prompt", "hotwords" or "none"."""
         self._model = model
+        self._vocabulary = tuple(vocabulary)
         self._options: dict[str, Any] = {"language": language, "beam_size": beam_size}
         if vocabulary and vocabulary_as == "prompt":
             self._options["initial_prompt"] = vocabulary_prompt(vocabulary)
@@ -47,7 +56,14 @@ class Transcriber:
 
     def transcribe(self, audio: np.ndarray) -> Transcript:
         started = time.perf_counter()
-        segments = list(self._model.transcribe(audio, **self._options)[0])
-        text = "".join(segment.text for segment in segments).strip()
-        no_speech = max((segment.no_speech_prob for segment in segments), default=1.0)
+        text, no_speech = self._run(audio, self._options)
+        if "initial_prompt" in self._options and is_prompt_echo(text, self._vocabulary):
+            # Whisper repeated the name list instead of the speech: listen again without the list
+            without_prompt = {key: value for key, value in self._options.items() if key != "initial_prompt"}
+            text, no_speech = self._run(audio, without_prompt)
         return Transcript(text, no_speech, time.perf_counter() - started)
+
+    def _run(self, audio: np.ndarray, options: dict[str, Any]) -> tuple[str, float]:
+        segments = list(self._model.transcribe(audio, **options)[0])
+        text = "".join(segment.text for segment in segments).strip()
+        return text, max((segment.no_speech_prob for segment in segments), default=1.0)

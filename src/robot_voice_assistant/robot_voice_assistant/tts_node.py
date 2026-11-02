@@ -93,9 +93,19 @@ class TtsNode(Node):
                         f"Riva voice unavailable ({reason}); speaking with the local voice for 30 s."
                     ),
                 )
+                self._warm_up(riva)
                 self.get_logger().info(f"TTS ready (NVIDIA Riva, voice {riva_voice}; local Qwen3-TTS if unreachable).")
                 return engine, riva_rate
         return self._load_local_engine("qwen3" if choice == "riva" else choice, qwen_rate)
+
+    def _warm_up(self, riva: RivaSpeechEngine) -> None:
+        """Open the connection to NVIDIA's cloud now: the first request takes seconds longer than the rest."""
+        started = time.monotonic()
+        try:
+            riva.synthesize("Hello.")
+            self.get_logger().info(f"Riva voice warmed up in {time.monotonic() - started:.1f} s.")
+        except Exception as error:
+            self.get_logger().warn(f"Riva voice warm-up failed ({type(error).__name__}: {error}); it will retry when speaking.")
 
     def _load_local_engine(
         self, choice: str, qwen_rate: float, ready_label: str = "TTS ready"

@@ -58,3 +58,41 @@ def test_vocabulary_prompt_names_every_word() -> None:
     # No commands: Whisper sometimes copies prompt words into noisy speech, and a copied command would move the robot
     assert "walk" not in prompt.lower() and "turn" not in prompt.lower() and "robot" not in prompt.lower()
     assert vocabulary_prompt(()) == ""
+
+
+class PromptEchoWhisper:
+    """Whisper that copies its prompt instead of the speech when given one (the failure seen live)."""
+
+    def __init__(self, speech: str) -> None:
+        self.speech = speech
+        self.calls: list[dict[str, Any]] = []
+
+    def transcribe(self, audio: np.ndarray, **options: Any) -> tuple[list[SimpleNamespace], None]:
+        self.calls.append(options)
+        text = options.get("initial_prompt") or self.speech
+        return [SimpleNamespace(text=" " + text, no_speech_prob=0.05)], None
+
+
+def test_a_transcript_that_only_repeats_the_prompt_is_transcribed_again_without_it() -> None:
+    whisper = PromptEchoWhisper("What is the weather like today?")
+    vocabulary = ("Aideology", "Jorge Colotto", "Dubai Silicon Oasis", "MDS")
+    transcript = Transcriber(whisper, vocabulary=vocabulary).transcribe(np.zeros(16000, dtype=np.float32))
+    assert transcript.text == "What is the weather like today?"
+    assert len(whisper.calls) == 2 and "initial_prompt" not in whisper.calls[1]
+
+
+def test_a_real_question_using_the_names_is_kept() -> None:
+    whisper = FakeWhisper([" Who is Jorge Colotto at Aideology?"])
+    transcript = Transcriber(whisper, vocabulary=("Aideology", "Jorge Colotto", "MDS")).transcribe(np.zeros(16))
+    assert transcript.text == "Who is Jorge Colotto at Aideology?"
+
+
+def test_a_partial_echo_of_the_prompt_also_counts() -> None:
+    whisper = FakeWhisper([" Aideology, Jorge Colotto."])
+    vocabulary = ("Aideology", "Jorge Colotto", "Dubai Silicon Oasis", "MDS")
+    from robot_voice_assistant.speech_recognition import is_prompt_echo
+
+    assert is_prompt_echo("Aideology, Jorge Colotto.", vocabulary)
+    assert is_prompt_echo("aideology jorge colotto dubai silicon oasis mds", vocabulary)
+    assert not is_prompt_echo("Tell me about Aideology.", vocabulary)
+    assert not is_prompt_echo("", vocabulary)
