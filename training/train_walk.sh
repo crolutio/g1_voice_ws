@@ -5,4 +5,4 @@
 set -eo pipefail
 source "$HOME/isaacsim-env/bin/activate"
 cd "$HOME/g1_voice_ws/training"
-exec python -u train_walk.py --rl_library rsl_rl --task R1-Walk-Flat "$@" physics=isaacsim_physx
+exec python -u train_walk.py --rl_library rsl_rl --task "${TASK:-R1-Walk-Flat}" "$@" physics=isaacsim_physx

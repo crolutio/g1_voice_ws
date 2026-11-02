@@ -10,3 +10,13 @@ class R1WalkPPORunnerCfg(G1FlatPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
         self.experiment_name = "r1_walk_flat"
+        # Less exploration noise than the G1 default (0.008): with the many gait rules the action noise kept
+        # growing (std 0.6 -> 1.8) until training became unstable.
+        self.algorithm.entropy_coef = 0.002
+
+
+@configclass
+class R1WalkPlanPPORunnerCfg(R1WalkPPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.experiment_name = "r1_walk_plan"
