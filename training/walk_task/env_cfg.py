@@ -208,15 +208,18 @@ class R1WalkPlanEnvCfg(R1WalkFlatEnvCfg):
         from .plan_action import PlanFollowingActionCfg
 
         self.actions.joint_pos = PlanFollowingActionCfg(asset_name="robot")
-        # the arms swing with the walk (set by the plan) instead of moving through gesture poses
-        self.events.animate_upper_body = None
-        self.events.reset_upper_body = None
+        # gestures while walking and standing, like the voice robot: the arm swing rides on them (see
+        # _command_upper_body); arms move at about the speed of the gesture node's gestures
+        self.events.animate_upper_body.params["step_fraction"] = 0.08
 
         policy = self.observations.policy
         policy.step_clock = None
         policy.plan_phase = ObsTerm(func=walk_mdp.plan_phase)
         policy.plan_leg_angles = ObsTerm(func=walk_mdp.plan_leg_angles)
         policy.plan_stance = ObsTerm(func=walk_mdp.plan_stance)
+        # the policy sees the joints with the commanded gesture taken out (a raised arm looks like a resting one)
+        policy.joint_pos.func = walk_mdp.joint_pos_without_gesture
+        policy.joint_vel.func = walk_mdp.joint_vel_without_gesture
 
         # the plan makes the gait, so the hand-made gait rules are off
         for name in ("swing_foot_too_low", "jumping", "step_rhythm", "one_foot_forward", "swing_knee_bend",

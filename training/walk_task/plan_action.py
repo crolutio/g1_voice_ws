@@ -9,6 +9,7 @@ small corrections on top of the planned leg angles, so it learns to keep its bal
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import TYPE_CHECKING
 
@@ -58,6 +59,20 @@ class PlanFollowingAction(JointPositionAction):
         self.arm_pose = self._arm_neutral.clone()  # arm pose the swing rides on: follows the commanded pose smoothly
         self._arm_goal = self._arm_neutral.clone()  # commanded arm pose (gestures)
         self.arm_targets = self._arm_neutral.clone()
+        # the commanded gesture, per joint (offset from the default pose, and its rate), for the policy's view
+        joints = self._asset.data.default_joint_pos.torch.shape[1]
+        self.gesture_offset = torch.zeros(self.num_envs, joints, device=self.device)
+        self.gesture_rate = torch.zeros_like(self.gesture_offset)
+        self._other_gesture = torch.zeros_like(self.gesture_offset)  # joints the gesture sets directly
+        # centre of mass: the upper body's weight offset from the pelvis, and its resting value per robot
+        self._upper_ids = [i for i, name in enumerate(self._asset.body_names)
+                           if re.search(r"shoulder|elbow|wrist|hand|head|waist|torso", name)]
+        masses = self._asset.data.default_mass
+        masses = (masses.torch if hasattr(masses, "torch") else masses).to(self.device).float()
+        self._upper_masses = masses[:, self._upper_ids]
+        self._total_mass = masses.sum(dim=1, keepdim=True)
+        self._upper_rest = torch.zeros(self.num_envs, 2, device=self.device)
+        self._upper_rest_known = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
     def process_actions(self, actions: torch.Tensor) -> None:
         dt = self._env.step_dt
@@ -75,11 +90,17 @@ class PlanFollowingAction(JointPositionAction):
         self._phase = torch.where(self._walk_in > 0,
                                   torch.remainder(self._phase + dt / cycle_period(plan, command), 1.0),
                                   torch.full_like(self._phase, plan.stance_fraction))
+        self.arm_pose = move_toward(self.arm_pose, self._arm_goal, self.cfg.arm_speed * dt)  # arms never jump
+        offset = self._other_gesture.clone()
+        offset[:, self._arm_ids] = self.arm_pose - self._arm_neutral
+        self.gesture_rate = (offset - self.gesture_offset) / dt
+        self.gesture_offset = offset
         hips_xy = data.root_pos_w.torch[:, :2].to(here)
         hips_yaw = heading_from_quat_xyzw(data.root_quat_w.torch).to(here)
         hips_velocity = data.root_lin_vel_w.torch[:, :2].to(here)
+        com_shift = self._com_shift().to(here) if self.cfg.com_compensation else None
         feet = self.planter.step(hips_xy, hips_yaw, command, self._phase, ramp,
-                                 hips_velocity=hips_velocity if self.cfg.catch_steps else None)
+                                 hips_velocity=hips_velocity if self.cfg.catch_steps else None, com_shift=com_shift)
         for index, leg in enumerate(self._legs):
             columns = slice(6 * index, 6 * index + 6)
             self._reference[:, columns] = leg.solve(
@@ -88,7 +109,6 @@ class PlanFollowingAction(JointPositionAction):
             )
         shoulder, elbow = arm_motion(plan, self._phase, command, ramp)
         swing = torch.cat([shoulder, elbow], dim=1).to(self.device)
-        self.arm_pose = move_toward(self.arm_pose, self._arm_goal, self.cfg.arm_speed * dt)  # arms never jump
         self.arm_targets = swing_on_arm_pose(self.arm_pose, self._arm_neutral, swing)
         self.phase = self._phase.to(self.device)
         self.reference = self._reference.to(self.device)
@@ -101,9 +121,41 @@ class PlanFollowingAction(JointPositionAction):
                 self._processed_actions, min=self._clip[:, :, 0], max=self._clip[:, :, 1]
             )
 
-    def set_arm_pose(self, pose: torch.Tensor) -> None:
-        """Commanded arm pose (N, 4) in ARM_SWING_JOINTS order, e.g. from the gesture node; reached smoothly."""
-        self._arm_goal[:] = pose
+    arm_joint_names = ARM_SWING_JOINTS
+
+    def set_arm_pose(self, pose: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
+        """Commanded arm pose (N, 4) in ARM_SWING_JOINTS order, e.g. a gesture; reached smoothly."""
+        if env_ids is None:
+            self._arm_goal[:] = pose
+        else:
+            self._arm_goal[env_ids] = pose
+
+    def _com_shift(self) -> torch.Tensor:
+        """(N, 2, heading frame): how far gestures moved the body's centre of mass from its resting place."""
+        data = self._asset.data
+        pelvis = data.root_pos_w.torch[:, None, :2]
+        moment = ((data.body_pos_w.torch[:, self._upper_ids, :2] - pelvis) * self._upper_masses[..., None]).sum(1)
+        moment = moment / self._total_mass
+        yaw = heading_from_quat_xyzw(data.root_quat_w.torch)
+        cos, sin = torch.cos(yaw), torch.sin(yaw)
+        local = torch.stack([cos * moment[:, 0] + sin * moment[:, 1], -sin * moment[:, 0] + cos * moment[:, 1]], 1)
+        resting = self.gesture_offset.abs().amax(dim=1) < 0.05
+        first = ~self._upper_rest_known
+        self._upper_rest = torch.where(first[:, None], local, self._upper_rest)
+        self._upper_rest = torch.where((resting & ~first)[:, None], self._upper_rest + 0.02 * (local - self._upper_rest),
+                                       self._upper_rest)  # follows the resting pose slowly (not the arm swing)
+        self._upper_rest_known[:] = True
+        return local - self._upper_rest
+
+    def set_gesture_targets(self, joint_ids: list[int], targets: torch.Tensor, env_ids: torch.Tensor | None = None) -> None:
+        """Tell the walk which targets a gesture gives the other upper-body joints (set directly on the robot)."""
+        rows = slice(None) if env_ids is None else env_ids
+        default = self._asset.data.default_joint_pos.torch[rows][:, joint_ids]
+        values = targets - default
+        if env_ids is None:
+            self._other_gesture[:, joint_ids] = values
+        else:
+            self._other_gesture[env_ids[:, None], torch.as_tensor(joint_ids, device=self.device)] = values
 
     def apply_actions(self) -> None:
         super().apply_actions()
@@ -120,6 +172,12 @@ class PlanFollowingAction(JointPositionAction):
         self._reference[plan_ids] = torch.cat([leg.default_angles() for leg in self._legs], dim=1)
         self.phase[ids] = self.plan_cfg.stance_fraction
         self.reference[ids] = self._reference[plan_ids].to(self.device)
+        self.arm_pose[ids] = self._arm_neutral[ids]
+        self._arm_goal[ids] = self._arm_neutral[ids]
+        self.gesture_offset[ids] = 0.0
+        self.gesture_rate[ids] = 0.0
+        self._other_gesture[ids] = 0.0
+        self._upper_rest_known[ids] = False
 
 
 @configclass
@@ -132,6 +190,7 @@ class PlanFollowingActionCfg(JointPositionActionCfg):
     command_name: str = "base_velocity"
     walk_in_s: float = 0.8
     ik_iterations: int = 4  # warm-started from the previous step, so a few iterations suffice
+    com_compensation: bool = True  # shift the hips to keep the centre of mass over the feet during gestures
     reactive_stepping: bool = True  # start stepping when pushed or stumbling, even when told to stand
     catch_steps: bool = True  # land each step where the body is tipping
     arm_speed: float = 3.0  # rad/s: the fastest a commanded arm pose is followed (a 95 deg drop takes 0.55 s)

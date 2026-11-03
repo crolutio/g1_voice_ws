@@ -367,3 +367,43 @@ def test_arm_targets_move_toward_the_goal_at_a_limited_speed() -> None:
     moved = move_toward(current, goal, max_step=0.06)
     assert moved[0].tolist() == pytest.approx([0.15, -1.44])
     assert move_toward(torch.tensor([[0.10]]), torch.tensor([[0.12]]), max_step=0.06).item() == pytest.approx(0.12)
+
+
+# --- the policy sees the joints without the gesture: a raised arm looks like a resting (swinging) arm ---
+
+
+def test_gesture_offsets_are_taken_out_of_what_the_policy_sees() -> None:
+    from foot_placement.gait_planner import without_gesture
+
+    joint_pos = torch.tensor([[0.5, -1.35, 0.2]])  # a leg joint, a raised shoulder, a turned head
+    joint_vel = torch.tensor([[1.0, 2.0, 0.5]])
+    offset = torch.tensor([[0.0, -1.5, 0.2]])  # the gesture moved the shoulder by -1.5 and the head by 0.2
+    offset_rate = torch.tensor([[0.0, 2.0, 0.5]])
+    pos, vel = without_gesture(joint_pos, joint_vel, offset, offset_rate)
+    assert pos[0].tolist() == pytest.approx([0.5, 0.15, 0.0], abs=1e-6)
+    assert vel[0].tolist() == pytest.approx([1.0, 0.0, 0.0], abs=1e-6)
+
+
+# --- centre of mass: when the arms move the body's weight, the hips shift the other way to keep it over the feet ---
+
+
+def test_a_centre_of_mass_shift_moves_the_hips_the_other_way() -> None:
+    from foot_placement.gait_planner import FootPlanter
+
+    planter = FootPlanter(PLAN, count=1)
+    stand = (torch.zeros(1, 3), torch.tensor([PLAN.stance_fraction]), torch.zeros(1))
+    planter.step(torch.zeros(1, 2), torch.zeros(1), *stand)
+    shifted = planter.step(torch.zeros(1, 2), torch.zeros(1), *stand, com_shift=torch.tensor([[0.03, -0.01]]))
+    assert shifted.hips_offset[0].tolist() == pytest.approx([-0.03, 0.01], abs=1e-6)
+    # the feet targets are from where the hips should be: 3 cm further forward of them, 1 cm further right
+    assert shifted.position[0, :, 0].tolist() == pytest.approx([0.03, 0.03], abs=1e-6)
+
+
+def test_the_centre_of_mass_correction_is_limited() -> None:
+    from foot_placement.gait_planner import FootPlanter
+
+    planter = FootPlanter(PLAN, count=1)
+    stand = (torch.zeros(1, 3), torch.tensor([PLAN.stance_fraction]), torch.zeros(1))
+    planter.step(torch.zeros(1, 2), torch.zeros(1), *stand)
+    shifted = planter.step(torch.zeros(1, 2), torch.zeros(1), *stand, com_shift=torch.tensor([[0.5, 0.0]]))
+    assert shifted.hips_offset[0, 0].item() == pytest.approx(-PLAN.max_com_shift_m)

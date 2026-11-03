@@ -43,6 +43,7 @@ class GaitPlan:
     hip_sway_m: float = 0.03  # how far the hips shift sideways over the standing foot while walking
     catch_gain_s: float = 0.267  # catch step: landing moves by this times (actual - commanded) velocity; sqrt(h/g)
     max_catch_step_m: float = 0.12  # the largest catch-step correction, each way
+    max_com_shift_m: float = 0.06  # the largest hip shift that keeps the centre of mass over the feet
     stumble_speed: float = 0.2  # m/s off the command that counts as pushed or stumbling: start stepping
 
 
@@ -191,9 +192,11 @@ class FootPlanter:
 
     def step(
         self, hips_xy: torch.Tensor, hips_yaw: torch.Tensor, command: torch.Tensor, phase: torch.Tensor,
-        walk_in: torch.Tensor, hips_velocity: torch.Tensor | None = None,
+        walk_in: torch.Tensor, hips_velocity: torch.Tensor | None = None, com_shift: torch.Tensor | None = None,
     ) -> FeetPlan:
-        """``hips_velocity`` (N, 2, world): when given, a swinging foot lands where the body is tipping (catch step)."""
+        """``hips_velocity`` (N, 2, world): when given, a swinging foot lands where the body is tipping (catch step).
+        ``com_shift`` (N, 2, hips frame): how far the arms or waist moved the body's centre of mass; the hips shift
+        the other way (up to ``max_com_shift_m``) to keep it over the feet."""
         plan = self.plan
         new = ~self._placed
         if new.any():  # standing: feet side by side under the hips
@@ -251,6 +254,8 @@ class FootPlanter:
 
         relative_xy = _rotate(self.feet_world_xy - hips_xy.unsqueeze(1), -hips_yaw.unsqueeze(1))
         hips_offset = torch.stack([torch.zeros_like(middle_y), middle_y + hip_sway(plan, phase, amount)], dim=1)
+        if com_shift is not None:
+            hips_offset = hips_offset - com_shift.clamp(-plan.max_com_shift_m, plan.max_com_shift_m)
         relative_xy = relative_xy - hips_offset.unsqueeze(1)
         lift = torch.where(stance, torch.zeros_like(smooth), torch.sin(torch.pi * swing_progress))
         height = plan.stand_foot_z_m + (plan.foot_z_m - plan.stand_foot_z_m) * amount
@@ -311,3 +316,14 @@ def swing_on_arm_pose(
 def move_toward(current: torch.Tensor, goal: torch.Tensor, max_step: float) -> torch.Tensor:
     """``current`` moved toward ``goal`` by at most ``max_step`` per element (a rate limit, so nothing jumps)."""
     return current + (goal - current).clamp(-max_step, max_step)
+
+
+def without_gesture(
+    joint_pos: torch.Tensor, joint_vel: torch.Tensor, gesture_offset: torch.Tensor, gesture_rate: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Joint positions and velocities with the commanded gesture taken out (what the policy sees).
+
+    A gesture moves the upper body's targets away from rest; taking that commanded part out leaves the swing and
+    the tracking error, which the policy knows from walking, so a raised arm is not an input it has never seen.
+    """
+    return joint_pos - gesture_offset, joint_vel - gesture_rate

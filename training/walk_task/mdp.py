@@ -4,11 +4,16 @@ for walking with bent knees."""
 from __future__ import annotations
 
 import json
+import os
+import sys
 from typing import TYPE_CHECKING
 
 import torch
 
 from isaaclab.managers import SceneEntityCfg
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from foot_placement.gait_planner import without_gesture  # noqa: E402
 
 from .reward_math import (
     both_feet_in_air,
@@ -77,9 +82,7 @@ def reset_upper_body(
     ids = _as_index_tensor(env, env_ids)
     state.goal[ids] = state.neutral
     state.target[ids] = state.neutral
-    env.scene[asset_cfg.name].actuators.target_command.set_position_index(
-        value=state.target[ids], joint_ids=state.joint_ids, env_ids=ids
-    )
+    _command_upper_body(env, asset_cfg, state, ids)
 
 
 def animate_upper_body(
@@ -99,8 +102,26 @@ def animate_upper_body(
         choice = torch.randint(len(state.poses), (len(resample),), device=env.device)
         state.goal[resample] = state.poses[choice]
     state.target[ids] += step_fraction * (state.goal[ids] - state.target[ids])
-    env.scene[asset_cfg.name].actuators.target_command.set_position_index(
-        value=state.target[ids], joint_ids=state.joint_ids, env_ids=ids
+    _command_upper_body(env, asset_cfg, state, ids)
+
+
+def _command_upper_body(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg, state: _UpperBodyState, ids: torch.Tensor) -> None:
+    """Send the gesture targets. When walking on a plan, the arm joints that swing with the legs go through the
+    plan (the swing rides on the gesture, as on the voice robot); the other joints go straight to the actuators."""
+    asset = env.scene[asset_cfg.name]
+    term = env.action_manager.get_term("joint_pos") if hasattr(env, "action_manager") else None
+    if term is None or not hasattr(term, "set_arm_pose"):
+        asset.actuators.target_command.set_position_index(value=state.target[ids], joint_ids=state.joint_ids, env_ids=ids)
+        return
+    if not hasattr(state, "swing_columns"):
+        names = [asset.joint_names[j] for j in state.joint_ids]
+        state.swing_columns = [names.index(name) for name in term.arm_joint_names]
+        state.other_columns = [i for i in range(len(names)) if i not in state.swing_columns]
+        state.other_joint_ids = [state.joint_ids[i] for i in state.other_columns]
+    term.set_arm_pose(state.target[ids][:, state.swing_columns], env_ids=ids)
+    term.set_gesture_targets(state.other_joint_ids, state.target[ids][:, state.other_columns], env_ids=ids)
+    asset.actuators.target_command.set_position_index(
+        value=state.target[ids][:, state.other_columns], joint_ids=state.other_joint_ids, env_ids=ids
     )
 
 
@@ -322,3 +343,17 @@ def follow_plan_joints(env: ManagerBasedRLEnv, std: float) -> torch.Tensor:
     term = _plan(env)
     angles = env.scene["robot"].data.joint_pos.torch[:, term._joint_ids]
     return torch.exp(-torch.sum((angles - term.reference) ** 2, dim=1) / std**2)
+
+
+def joint_pos_without_gesture(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Observation: joint positions relative to the default pose, with the commanded gesture taken out."""
+    robot, term = env.scene["robot"], _plan(env)
+    relative = robot.data.joint_pos.torch - robot.data.default_joint_pos.torch
+    return without_gesture(relative, torch.zeros_like(relative), term.gesture_offset, term.gesture_rate)[0]
+
+
+def joint_vel_without_gesture(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Observation: joint velocities relative to the default, with the commanded gesture's motion taken out."""
+    robot, term = env.scene["robot"], _plan(env)
+    relative = robot.data.joint_vel.torch - robot.data.default_joint_vel.torch
+    return without_gesture(torch.zeros_like(relative), relative, term.gesture_offset, term.gesture_rate)[1]

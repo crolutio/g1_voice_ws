@@ -36,9 +36,11 @@ class MotionSpec:
 MOTIONS: dict[str, MotionSpec] = {
     "walk_forward": MotionSpec(forward_m=1.0, speed=0.5),
     "walk_backward": MotionSpec(forward_m=-0.5, speed=0.3),
-    "turn_left": MotionSpec(turn_deg=90.0, speed=0.8),
-    "turn_right": MotionSpec(turn_deg=-90.0, speed=0.8),
-    "turn_around": MotionSpec(turn_deg=180.0, speed=0.8),
+    # Turning on the spot at 0.5 rad/s: at 0.8 rad/s the walk fell in 13 of 32 robots after a few minutes of use
+    # (test_falls.py "voice robot sequence x3"); at 0.5 rad/s none fell. A 90 degree turn takes about 3 s.
+    "turn_left": MotionSpec(turn_deg=90.0, speed=0.5),
+    "turn_right": MotionSpec(turn_deg=-90.0, speed=0.5),
+    "turn_around": MotionSpec(turn_deg=180.0, speed=0.5),
     "keep_walking": MotionSpec(speed=0.5, continuous=True),
 }
 

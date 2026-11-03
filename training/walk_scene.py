@@ -32,6 +32,8 @@ from isaaclab_rl.rsl_rl import check_rsl_rl_version  # noqa: E402
 from isaaclab_tasks.utils import get_checkpoint_path, resolve_task_config  # noqa: E402
 
 TASK = "R1-Walk-Plan-Flat-Play"  # foot planter + IK walk, balanced by the policy
+# The tested policy (no falls in test_falls.py and test_gesture_balance.py); newer runs are not used until tested.
+BEST_CHECKPOINT = "2026-11-03_09-50-54/model_4950.pt"
 
 
 def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool) -> None:
@@ -66,7 +68,7 @@ def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", default="", help="model_*.pt to load (default: latest training run)")
+    parser.add_argument("--checkpoint", default="", help="model_*.pt to load (default: BEST_CHECKPOINT)")
     parser.add_argument("--headless", action="store_true", help="run without any window (same as --viewer none)")
     parser.add_argument(
         "--viewer",
@@ -95,7 +97,8 @@ def main() -> None:
         agent_cfg = handle_deprecated_rsl_rl_cfg(cli_args.update_rsl_rl_cfg(agent_cfg, args_cli), check_rsl_rl_version())
         apply_env_overrides(args_cli, env_cfg)
         log_root = os.path.join(TRAINING_DIR, "logs", "rsl_rl", agent_cfg.experiment_name)
-        checkpoint = own_args.checkpoint or get_checkpoint_path(log_root, ".*", r"model_.*\.pt")
+        best = os.path.join(log_root, BEST_CHECKPOINT)
+        checkpoint = own_args.checkpoint or (best if os.path.exists(best) else get_checkpoint_path(log_root, ".*", r"model_.*\.pt"))
         print(f"[walk_scene] Loading policy {checkpoint}", flush=True)
 
         env = create_isaaclab_env(args_cli.task, env_cfg, args_cli, convert_marl_to_single_agent=False)
@@ -133,6 +136,8 @@ def main() -> None:
                 walk_term.set_arm_pose(torch.tensor([[targets.pop(name) for name in ARM_SWING_JOINTS]],
                                                     device=base_env.device))
             if targets:
+                walk_term.set_gesture_targets([joint_index[name] for name in targets],
+                                              torch.tensor([list(targets.values())], device=base_env.device))
                 robot.actuators.target_command.set_position_index(
                     value=torch.tensor([list(targets.values())], device=base_env.device),
                     joint_ids=[joint_index[name] for name in targets],

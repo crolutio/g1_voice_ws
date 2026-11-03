@@ -27,8 +27,8 @@ TESTS = [  # (label, forward m/s, turn rad/s, simulated seconds, right shoulder 
     ("stop", 0.0, 0.0, 2.0, None),
     ("walk backward 0.3 m/s", -0.3, 0.0, 5.0, None),
     ("stop", 0.0, 0.0, 2.0, None),
-    ("turn left 0.8 rad/s", 0.0, 0.8, 4.0, None),
-    ("turn right 0.8 rad/s", 0.0, -0.8, 4.0, None),
+    ("turn left 0.5 rad/s", 0.0, 0.5, 6.4, None),
+    ("turn right 0.5 rad/s", 0.0, -0.5, 6.4, None),
     ("walk forward 0.5 m/s again", 0.5, 0.0, 5.0, None),
     ("stop", 0.0, 0.0, 3.0, None),
 ]

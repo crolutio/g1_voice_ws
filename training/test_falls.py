@@ -12,6 +12,7 @@ scenario the torso tilt, speed and turn errors (once each command has settled) a
 from __future__ import annotations
 
 import argparse
+import math
 import contextlib
 import os
 import sys
@@ -34,6 +35,8 @@ from isaaclab_tasks.utils import get_checkpoint_path, resolve_task_config  # noq
 
 TASK = "R1-Walk-Plan-Flat-Play"
 STAND, FORWARD, BACKWARD = (0.0, 0.0, 0.0), (0.5, 0.0, 0.0), (-0.3, 0.0, 0.0)
+VOICE_SEQUENCE = [(STAND, 2.0), (FORWARD, 6.0), (STAND, 2.0), (BACKWARD, 5.0), (STAND, 2.0), ((0.0, 0.0, 0.5), 6.4),
+                  ((0.0, 0.0, -0.5), 6.4), (FORWARD, 5.0), (STAND, 3.0)]  # what drive_walk_scene.py sends
 SCENARIOS = {  # name: [(forward m/s, sideways m/s, turn rad/s), seconds), ...]
     "forward": [(STAND, 2.0), (FORWARD, 8.0)],
     "backward from standing": [(STAND, 2.0), (BACKWARD, 8.0)],
@@ -42,6 +45,14 @@ SCENARIOS = {  # name: [(forward m/s, sideways m/s, turn rad/s), seconds), ...]
     "forward straight to backward": [(STAND, 2.0), (FORWARD, 4.0), (BACKWARD, 6.0)],
     "turn left, then right": [(STAND, 2.0), ((0.0, 0.0, 0.8), 4.0), ((0.0, 0.0, -0.8), 4.0)],
     "walk, stop, walk": [(STAND, 2.0), (FORWARD, 3.0), (STAND, 2.0), (FORWARD, 3.0), (STAND, 2.0)],
+    "backward, stop, turn left": [(STAND, 2.0), (BACKWARD, 5.0), (STAND, 2.0), ((0.0, 0.0, 0.8), 4.0)],
+    "forward, stop, turn right": [(STAND, 2.0), (FORWARD, 5.0), (STAND, 2.0), ((0.0, 0.0, -0.8), 4.0)],
+    "voice robot sequence": VOICE_SEQUENCE,
+    "voice robot sequence x3": VOICE_SEQUENCE[1:] * 3,
+    "turned 80 deg first": [((0.0, 0.0, -0.8), 2.0), (STAND, 2.0)] + VOICE_SEQUENCE,
+    "walked 5 m first": [(FORWARD, 16.0), (STAND, 2.0)] + VOICE_SEQUENCE,
+    "stood 70 s first": [(STAND, 70.0)] + VOICE_SEQUENCE,
+    "voice robot sequence x2": VOICE_SEQUENCE[1:] * 2,
 }
 FALLEN_BELOW_M = 0.5
 WAYS = ("front", "back", "left", "right")
@@ -54,9 +65,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--checkpoint", default="", nargs="*", help="one or more model_*.pt, tested one after another")
     parser.add_argument("--robots", type=int, default=16, help="robots per scenario")
+    parser.add_argument("--deployment", action="store_true", help="the walk scene's settings (planner on the CPU, ...)")
+    parser.add_argument("--gestures", action="store_true", help="random gestures as in training (much harder)")
+    parser.add_argument("--turn-speed", type=float, default=None, help="rad/s for the voice sequence's turns")
+    parser.add_argument("--trace", action="store_true", help="print 4 robots of the first scenario at 74-80 s")
+    parser.add_argument("--only", nargs="*", default=None, help="run only these scenarios")
+    parser.add_argument("--spacing", type=float, default=None, help="metres between the robots (default 2.5)")
+    parser.add_argument("--no-com", action="store_true", help="turn the centre-of-mass correction off")
+    parser.add_argument("--debug-scenario", default="", help="print the plan and hip twist of this scenario's robots")
     parser.add_argument("--times", action="store_true", help="also print when each robot fell")
     parser.add_argument("--no-policy", action="store_true", help="follow the plan alone (policy corrections off)")
     own_args, launcher_args = parser.parse_known_args()
+    if own_args.turn_speed:
+        for name, steps in SCENARIOS.items():
+            SCENARIOS[name] = [((c[0], c[1], math.copysign(own_args.turn_speed, c[2]) if c[2] else 0.0), t * (0.8 / own_args.turn_speed if c[2] else 1.0))
+                               for c, t in steps]
+    if own_args.only:
+        for name in list(SCENARIOS):
+            if name not in own_args.only:
+                del SCENARIOS[name]
     names = list(SCENARIOS)
     num_envs = own_args.robots * len(names)
     args_cli = _parse_args(["--task", TASK, "--num_envs", str(num_envs), "--viz", "none", *launcher_args,
@@ -65,6 +92,18 @@ def main() -> None:
     env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent, play_mode=True)
     env_cfg.scene.num_envs = num_envs
     env_cfg.episode_length_s = 1.0e6
+    if own_args.deployment:
+        from walk_scene import configure_for_deployment
+
+        configure_for_deployment(env_cfg, "none", follow_camera=False)
+        env_cfg.scene.num_envs = num_envs
+        env_cfg.episode_length_s = 1.0e6
+    if own_args.spacing:
+        env_cfg.scene.env_spacing = own_args.spacing
+    if own_args.no_com:
+        env_cfg.actions.joint_pos.com_compensation = False
+    if not own_args.gestures:  # the voice robot gestures through the gesture node, tested in test_gesture_balance.py
+        env_cfg.events.animate_upper_body = None
     for name in ("base_contact", "lost_balance", "hips_too_low"):  # a fallen robot stays down, so we can count it
         setattr(env_cfg.terminations, name, None)
     command_cfg = env_cfg.commands.base_velocity
@@ -142,6 +181,32 @@ def test_policy(env, policy, own_args, num_envs: int) -> None:
         left = -velocity[:, 0] * torch.sin(yaw) + velocity[:, 1] * torch.cos(yaw)
         direction = torch.where(ahead.abs() > left.abs(), torch.where(ahead > 0, 0, 1), torch.where(left > 0, 2, 3))
         fell_toward[down] = direction[down]
+        if own_args.trace and 74.0 <= now <= 80.0 and tick % 5 == 0:
+            first = int((scenario_of == 0).nonzero()[0])
+            term = base_env.action_manager.get_term("joint_pos")
+            for robot_id in range(first, first + 4):
+                feet_yaw = torch.atan2(term.feet.rotation[robot_id, :, 1, 0], term.feet.rotation[robot_id, :, 0, 0])
+                hip = robot.data.joint_pos.torch[robot_id, [term._joint_ids[2], term._joint_ids[8]]]
+                plan_hip = term.reference[robot_id, [2, 8]]
+                print(f"TRACE r{robot_id - first} t={now:5.2f} z {float(robot.data.root_pos_w.torch[robot_id, 2]):4.2f}"
+                      f" phase {float(term.phase[robot_id]):4.2f} stance {term.feet.stance[robot_id].int().tolist()}"
+                      f" plan foot yaw {feet_yaw[0]:5.2f} {feet_yaw[1]:5.2f} ref hip yaw {plan_hip[0]:5.2f} {plan_hip[1]:5.2f}"
+                      f" hip yaw {hip[0]:5.2f} {hip[1]:5.2f} wz {float(robot.data.root_ang_vel_b.torch[robot_id, 2]):5.2f}"
+                      f" yaw {float(torch.rad2deg(yaw[robot_id])):7.1f}", flush=True)
+
+        if own_args.debug_scenario and tick % int(0.5 / dt) == 0:
+            rows = (scenario_of == names.index(own_args.debug_scenario)) & (fell_in_step < 0)
+            if rows.any():
+                term = base_env.action_manager.get_term("joint_pos")
+                hip_yaw = robot.data.joint_pos.torch[:, [term._joint_ids[2], term._joint_ids[8]]]
+                feet_yaw = torch.atan2(term.feet.rotation[:, :, 1, 0], term.feet.rotation[:, :, 0, 0])
+                print(f"DEBUG t={now:5.1f} up {int(rows.sum()):2d}  hip yaw max {float(hip_yaw[rows].abs().max()):4.2f}"
+                      f"  plan foot yaw max {float(feet_yaw[rows].abs().max()):4.2f}"
+                      f"  walk_in {float(term._walk_in[rows.to(term._walk_in.device)].mean()):4.2f}"
+                      f"  com shift {float(term._com_shift()[rows].abs().max()):5.3f}"
+                      f"  yaw {float(torch.rad2deg(yaw[rows]).mean()):7.1f}"
+                      f"  x {float(robot.data.root_pos_w.torch[rows, 0].mean() - base_env.scene.env_origins[rows, 0].mean()):5.2f}",
+                      flush=True)
 
         # balance and speed, for robots still up, once each command has settled (1 s after it changes)
         up = fell_in_step < 0
