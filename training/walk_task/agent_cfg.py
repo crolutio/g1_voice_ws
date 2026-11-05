@@ -20,3 +20,6 @@ class R1WalkPlanPPORunnerCfg(R1WalkPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
         self.experiment_name = "r1_walk_plan"
+        # fine-tuning a policy that already walks: small, careful updates so it keeps what it knows
+        self.algorithm.learning_rate = 3.0e-4
+        self.algorithm.desired_kl = 0.005

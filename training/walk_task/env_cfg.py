@@ -247,6 +247,17 @@ class R1WalkPlanEnvCfg(R1WalkFlatEnvCfg):
         # the voice assistant starts, stops and reverses often: practise that, with more standing in between
         self.commands.base_velocity.resampling_time_range = (2.0, 4.0)
         self.commands.base_velocity.rel_standing_envs = 0.25
+        # turning on the spot is the hardest move for the voice robot: 30% of new commands practise it
+        from .commands import TurnPracticeVelocityCommandCfg
+
+        practice = TurnPracticeVelocityCommandCfg()
+        for name, value in vars(self.commands.base_velocity).items():
+            if name != "class_type":
+                setattr(practice, name, value)
+        self.commands.base_velocity = practice
+        self.commands.base_velocity.rel_turn_in_place_envs = 0.1  # 0.3 made slow turns and walking worse
+        # pushed more often than the default (every 10-15 s), so it keeps its balance when bumped
+        self.events.push_robot.interval_range_s = (6.0, 10.0)
         # room for bigger balance corrections on top of the plan
         self.actions.joint_pos.scale = 0.35
 

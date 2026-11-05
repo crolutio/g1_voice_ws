@@ -168,3 +168,14 @@ def sideways_capture_point_outside(
     left_edge = feet_y.max(dim=1).values + margin
     right_edge = feet_y.min(dim=1).values - margin
     return (capture_y - left_edge).clamp(min=0) + (right_edge - capture_y).clamp(min=0)
+
+
+def turn_in_place(
+    commands: torch.Tensor, chosen: torch.Tensor, low: float, high: float, unit_random: torch.Tensor
+) -> torch.Tensor:
+    """Velocity commands (N, 3) where the ``chosen`` robots turn on the spot: no forward or sideways speed, and a
+    turn rate between ``low`` and ``high`` rad/s (from ``unit_random`` in [0, 1]) in their turn direction."""
+    direction = torch.where(commands[:, 2] < 0, -1.0, 1.0)
+    rate = direction * (low + (high - low) * unit_random)
+    turning = torch.stack([torch.zeros_like(rate), torch.zeros_like(rate), rate], dim=1)
+    return torch.where(chosen.unsqueeze(1), turning, commands)

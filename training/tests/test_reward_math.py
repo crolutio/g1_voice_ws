@@ -241,3 +241,17 @@ def test_capture_point_past_the_outer_foot_is_penalised_by_how_far() -> None:
     outside = sideways_capture_point_outside(falling_left, torch.tensor([0.7, 0.7]), feet_y, margin=0.03)
     assert outside[0].item() == pytest.approx(0.6 / omega - 0.13, abs=1e-5)
     assert outside[1].item() == pytest.approx(0.9 / omega - 0.13, abs=1e-5)
+
+
+# --- commands: some robots practise turning on the spot (no forward or sideways speed, a clear turn rate) ---
+
+
+def test_chosen_robots_turn_on_the_spot_at_a_clear_rate() -> None:
+    from reward_math import turn_in_place
+
+    commands = torch.tensor([[0.5, 0.1, 0.05], [0.8, 0.0, -0.3], [-0.3, 0.2, 0.9]])
+    chosen = torch.tensor([True, True, False])
+    turned = turn_in_place(commands, chosen, low=0.4, high=1.0, unit_random=torch.tensor([0.0, 1.0, 0.5]))
+    assert turned[0].tolist() == pytest.approx([0.0, 0.0, 0.4])  # keeps the turn direction (left) at the slowest rate
+    assert turned[1].tolist() == pytest.approx([0.0, 0.0, -1.0])  # right, at the fastest
+    assert turned[2].tolist() == pytest.approx([-0.3, 0.2, 0.9])  # not chosen: unchanged
