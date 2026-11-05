@@ -135,3 +135,10 @@ def test_a_sound_alike_in_the_middle_of_a_sentence_is_someone_else() -> None:
     gate = WakeWordGate(WAKE_WORDS, sound_alikes=("robert",))
     assert gate.accept("I told Robert about the meeting.", now_s=0.0) is None
     assert not gate.in_conversation
+
+
+def test_greeting_a_person_starts_a_conversation_without_the_wake_word() -> None:
+    gate = _gate()
+    gate.start_conversation(now_s=10.0)  # the robot said "Hello, may I help you?" to someone walking up
+    assert gate.in_conversation
+    assert gate.accept("What is this?", now_s=12.0) == "What is this?"

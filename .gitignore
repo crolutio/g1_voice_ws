@@ -33,3 +33,8 @@ training/outputs/
 # Robot conversion log
 robots/r1/convert.log
 training/imgui.ini
+
+# YOLO-World downloads its CLIP text encoder here on first use (338 MB)
+weights/
+# made by training/surroundings.py on first use (the apple model and its texture)
+training/assets/

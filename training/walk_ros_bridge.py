@@ -12,7 +12,8 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rosgraph_msgs.msg import Clock
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import String
 
 # Stop walking if no velocity command arrives for this long (for example if the motion node crashed).
 COMMAND_TIMEOUT_S = 0.5
@@ -30,12 +31,16 @@ class WalkRosBridge:
         self._velocity = (0.0, 0.0, 0.0)
         self._velocity_time = 0.0
         self._upper_body: dict[str, float] = {}
+        self._show_requests: list[str] = []
 
         self._node.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self._node.create_subscription(JointState, "/robot/joint_command", self._on_joint_command, 10)
         self._clock_pub = self._node.create_publisher(Clock, "/clock", 10)
         self._joint_pub = self._node.create_publisher(JointState, "/robot/joint_states", 10)
         self._odom_pub = self._node.create_publisher(Odometry, "/robot/odom", 10)
+        self._image_pub = self._node.create_publisher(Image, "/robot/camera/image_raw", 2)
+        # "apple", "banana", ... or "none": hold that object up in front of the robot's camera (surroundings.py)
+        self._node.create_subscription(String, "/scene/show", self._on_show, 10)
         self._executor = rclpy.executors.SingleThreadedExecutor()
         self._executor.add_node(self._node)
 
@@ -49,6 +54,26 @@ class WalkRosBridge:
         with self._lock:
             self._velocity = clamped
             self._velocity_time = time.monotonic()
+
+    def _on_show(self, msg: String) -> None:
+        with self._lock:
+            self._show_requests.append(msg.data)
+
+    def show_requests(self) -> list[str]:
+        """Objects asked for on /scene/show since the last call."""
+        with self._lock:
+            requests, self._show_requests = self._show_requests, []
+        return requests
+
+    def publish_image(self, sim_time_s: float, rgb) -> None:
+        """Publish a head camera image (H x W x 3 uint8 array) as sensor_msgs/Image (rgb8)."""
+        msg = Image()
+        msg.header.stamp.sec, msg.header.stamp.nanosec = int(sim_time_s), int((sim_time_s % 1.0) * 1e9)
+        msg.header.frame_id = "head_camera"
+        msg.height, msg.width = int(rgb.shape[0]), int(rgb.shape[1])
+        msg.encoding, msg.step = "rgb8", int(rgb.shape[1]) * 3
+        msg.data = rgb.tobytes()
+        self._image_pub.publish(msg)
 
     def _on_joint_command(self, msg: JointState) -> None:
         with self._lock:

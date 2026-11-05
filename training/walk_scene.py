@@ -33,7 +33,7 @@ from isaaclab_tasks.utils import get_checkpoint_path, resolve_task_config  # noq
 
 TASK = "R1-Walk-Plan-Flat-Play"  # foot planter + IK walk, balanced by the policy
 # The tested policy (no falls in test_falls.py and test_gesture_balance.py); newer runs are not used until tested.
-BEST_CHECKPOINT = "2026-11-03_09-50-54/model_4950.pt"
+BEST_CHECKPOINT = "2026-11-05_10-59-32/model_5449.pt"
 
 
 def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool) -> None:
@@ -76,15 +76,24 @@ def main() -> None:
         default="newton_gl",
         help="newton_gl: light OpenGL window (fast); kit: full Isaac Sim window (slow on some laptops)",
     )
+    parser.add_argument("--surroundings", action="store_true",
+                        help="head camera on ROS, people walking past and objects around (surroundings.py)")
+    parser.add_argument("--people", type=int, default=2, help="with --surroundings: how many people walk past")
     parser.add_argument("--no-follow", action="store_true", help="do not move the camera with the robot")
     own_args, launcher_args = parser.parse_known_args()
 
     viewer = "none" if own_args.headless else own_args.viewer
     argv = ["--task", TASK, "--num_envs", "1", "--viz", viewer, *launcher_args]
     args_cli = _parse_args([*argv, "physics=isaacsim_physx"])
+    if own_args.surroundings:
+        args_cli.enable_cameras = True  # the head camera needs rendering, also without a window
     check_rsl_rl_version()
     env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent, play_mode=True)
     configure_for_deployment(env_cfg, viewer, follow_camera=not own_args.no_follow)
+    if own_args.surroundings:
+        from surroundings import configure_head_camera
+
+        configure_head_camera(env_cfg)
 
     with launch_simulation(env_cfg, args_cli), contextlib.ExitStack() as cleanup:
         import torch
@@ -118,6 +127,14 @@ def main() -> None:
         bridge = WalkRosBridge()
         heading_hold = HeadingHold()  # walking straight keeps the heading it started with
         cleanup.callback(bridge.shutdown)
+        surroundings = camera = None
+        if own_args.surroundings:
+            from surroundings import Surroundings
+
+            origin = base_env.scene.env_origins[0, :2].tolist()
+            surroundings = Surroundings(base_env.sim.stage, (origin[0], origin[1]), people=own_args.people)
+            camera = base_env.scene.sensors["head_camera"]
+            last_image_time = -1.0
 
         step_dt = base_env.step_dt
         sim_time = 0.0
@@ -158,6 +175,14 @@ def main() -> None:
                 data.root_lin_vel_b.torch[0].tolist(),
                 data.root_ang_vel_b.torch[0].tolist(),
             )
+            if surroundings is not None:
+                surroundings.step(step_dt)
+                for name in bridge.show_requests():
+                    robot_xy = tuple(robot.data.root_pos_w.torch[0, :2].tolist())
+                    print(f"[walk_scene] Showing: {surroundings.show(name, robot_xy, yaw)}", flush=True)
+                if sim_time - last_image_time >= camera.cfg.update_period:
+                    bridge.publish_image(sim_time, camera.data.output["rgb"].torch[0, ..., :3].cpu().numpy())
+                    last_image_time = sim_time
             if time.monotonic() - report_wall >= 5.0:
                 speed = (sim_time - report_sim) / (time.monotonic() - report_wall)
                 print(f"[walk_scene] simulation speed {speed:.0%} of real time", flush=True)

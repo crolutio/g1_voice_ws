@@ -36,6 +36,8 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("config", default_value=default_config),
             DeclareLaunchArgument("use_microphone", default_value="true",
                                   description="false = type messages on /voice/transcript instead of speaking"),
+            DeclareLaunchArgument("use_vision", default_value="true",
+                                  description="see through the head camera (YOLO-World): greet people, name objects"),
             DeclareLaunchArgument("use_sim_time", default_value="true",
                                   description="time gestures with Isaac Sim's /clock so they match the simulation speed"),
             node("stt_node", condition=IfCondition(use_microphone)),
@@ -43,6 +45,7 @@ def generate_launch_description() -> LaunchDescription:
             Node(package=PACKAGE, executable="motion_node", name="motion_node", output="screen",
                  parameters=[config, {"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)}]),
             node("tts_node"),
+            node("vision_node", condition=IfCondition(LaunchConfiguration("use_vision"))),
             Node(package=PACKAGE, executable="gesture_node", name="gesture_node", output="screen",
                  parameters=[config, {"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)}]),
         ]

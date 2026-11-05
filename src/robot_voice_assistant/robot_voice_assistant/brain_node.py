@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
@@ -19,6 +20,8 @@ from robot_voice_assistant.node_runner import run_node
 from robot_voice_assistant.ollama_client import OllamaClient
 from robot_voice_assistant.timing import seconds_since
 
+GREETING_FOR_PERSON = "Hello, may I help you?"
+SCENE_STALE_S = 3.0  # an older camera description no longer shows what is in front of the robot
 DEFAULT_KNOWLEDGE_DIR = os.path.join(get_package_share_directory("robot_voice_assistant"), "config", "knowledge")
 
 
@@ -49,17 +52,22 @@ class BrainNode(Node):
         self.create_subscription(String, "/voice/transcript", self._on_transcript, 10)
         self.create_subscription(String, "/voice/reset", self._on_reset, 10)
         self.create_subscription(String, "/voice/forget", self._on_forget, 10)
+        # what the head camera sees (vision_node); None until the vision node runs
+        self._scene: str | None = None
+        self._scene_time = 0.0
+        self.create_subscription(String, "/vision/scene", self._on_scene, 10)
+        self.create_subscription(String, "/vision/person_arrived", self._on_person_arrived, 10)
         threading.Thread(target=self._start, daemon=True).start()
 
     def _start(self) -> None:
         """Load the embedding model and the knowledge base (takes a little while), then start answering."""
         with self._busy:
             try:
-                self._conversation, notes = create_conversation(self._settings, self._backend)
+                self._conversation, notes = create_conversation(self._settings, self._backend, self._surroundings)
             except Exception as error:  # e.g. no GPU memory for the embedding model
                 self.get_logger().error(f"Could not load embeddings ({error}); continuing without them.")
                 self._settings.use_embeddings = False
-                self._conversation, notes = create_conversation(self._settings, self._backend)
+                self._conversation, notes = create_conversation(self._settings, self._backend, self._surroundings)
             for note in notes:
                 self.get_logger().info(note)
             try:
@@ -85,6 +93,26 @@ class BrainNode(Node):
             if self._conversation is not None:
                 self._conversation.forget_memories()
         self.get_logger().info("Long-term memory deleted.")
+
+    def _on_scene(self, msg: String) -> None:
+        self._scene, self._scene_time = msg.data, time.monotonic()
+
+    def _surroundings(self) -> str | None:
+        """What the camera sees now, for the prompt; None without a camera, "unclear" if the view is out of date."""
+        if self._scene is None:
+            return None
+        return self._scene if time.monotonic() - self._scene_time < SCENE_STALE_S else "the camera view is not available"
+
+    def _on_person_arrived(self, _msg: String) -> None:
+        """Someone walked up: greet them, unless the robot is busy answering."""
+        if not self._busy.acquire(blocking=False):
+            return
+        try:
+            self.get_logger().info(f"Greeting a person who walked up: {GREETING_FOR_PERSON!r}")
+            self._gesture_pub.publish(String(data="wave_right"))
+            self._reply_pub.publish(String(data=GREETING_FOR_PERSON))
+        finally:
+            self._busy.release()
 
     def _on_speech_ended(self, msg: Float64) -> None:
         self._speech_ended = msg.data
@@ -114,6 +142,8 @@ class BrainNode(Node):
         try:
             if self._conversation is None:
                 return
+            if (view := self._surroundings()) is not None:
+                self.get_logger().info(f"Camera view for this answer: {view}")
             try:
                 response = self._conversation.respond(text)
             except Exception as error:  # network or server failure must not kill the node

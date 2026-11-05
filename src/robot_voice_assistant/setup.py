@@ -29,6 +29,7 @@ setup(
             "tts_node = robot_voice_assistant.tts_node:main",
             "gesture_node = robot_voice_assistant.gesture_node:main",
             "motion_node = robot_voice_assistant.motion_node:main",
+            "vision_node = robot_voice_assistant.vision_node:main",
             "chat = robot_voice_assistant.chat_cli:main",
         ],
     },

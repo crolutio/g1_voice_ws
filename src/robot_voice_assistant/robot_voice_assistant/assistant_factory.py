@@ -6,7 +6,7 @@ Shared by brain_node (ROS 2) and the typed chat tool, so both behave the same.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from robot_voice_assistant.conversation import Conversation
@@ -56,7 +56,9 @@ def create_backend(settings: BrainSettings, environment: Mapping[str, str] = os.
     return FallbackBackend(None, fallback), f"local {settings.fallback_model}"
 
 
-def create_conversation(settings: BrainSettings, backend: FallbackBackend) -> tuple[Conversation, list[str]]:
+def create_conversation(
+    settings: BrainSettings, backend: FallbackBackend, surroundings: Callable[[], str | None] | None = None
+) -> tuple[Conversation, list[str]]:
     """The conversation, plus notes for the log about what was loaded (knowledge passages, memories)."""
     from robot_voice_assistant.semantic import CommandMatcher, KnowledgeBase, LongTermMemory, Qwen3Embedder, SemanticContext
 
@@ -91,5 +93,6 @@ def create_conversation(settings: BrainSettings, backend: FallbackBackend) -> tu
         motion_descriptions=MOTION_DESCRIPTIONS if settings.can_walk else None,
         retriever=retriever,
         command_matcher=matcher,
+        surroundings=surroundings,
     )
     return conversation, notes

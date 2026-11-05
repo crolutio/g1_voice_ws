@@ -89,6 +89,12 @@ class WakeWordGate:
         self._last_activity_s = float("-inf")
         self._greet_at_s: float | None = None
 
+    def start_conversation(self, now_s: float) -> None:
+        """The robot spoke first (it greeted someone walking up): the person can answer without the wake word."""
+        self.in_conversation = True
+        self._last_activity_s = now_s
+        self._greet_at_s = None
+
     def note_reply_finished(self, now_s: float) -> None:
         """The idle time of a conversation counts from the robot's last reply."""
         self._last_activity_s = now_s

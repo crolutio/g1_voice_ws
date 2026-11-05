@@ -13,6 +13,7 @@ from robot_voice_assistant.arithmetic import find_arithmetic, spoken_calculation
 from robot_voice_assistant.assistant_response import NO_GESTURE, NO_MOTION, AssistantResponse, parse_assistant_response
 from robot_voice_assistant.llm_backends import ChatBackend
 from robot_voice_assistant.ollama_client import ChatMessage, build_response_schema
+from robot_voice_assistant.scene_context import is_about_the_view
 from robot_voice_assistant.timing import StepTimer
 
 # Small models sometimes close the JSON string right before "'t" ("I don", "it isn").
@@ -158,7 +159,9 @@ def build_system_prompt(
     background_knowledge: str,
     now: datetime,
     motion_descriptions: Mapping[str, str] | None = None,
+    surroundings: str | None = None,
 ) -> str:
+    """``surroundings``: what the head camera sees now, in words (None = the robot has no camera)."""
     gesture_lines = "\n".join(f"- {name}: {description}" for name, description in gesture_descriptions.items())
     if motion_descriptions:
         motion_lines = "\n".join(f"- {name}: {description}" for name, description in motion_descriptions.items())
@@ -190,6 +193,16 @@ def build_system_prompt(
         )
         answer_format = '{"reply": "...", "gesture": "..."}'
 
+    if surroundings is not None:
+        body = body.replace("You cannot see, browse the internet,", "You cannot browse the internet,")
+        body += (
+            "What you see right now through the camera in your head: "
+            f"{surroundings.strip().rstrip('.')}. This is the current view: it replaces anything you saw or said "
+            "earlier in the conversation, because things are moved and people walk by. Use it when the person asks "
+            "what you see, what something is, or who is there; something they show you is usually right in front of "
+            "you. Name only what is listed here; if it is not listed, say you cannot see it clearly. Do not mention "
+            "it otherwise.\n\n"
+        )
     knowledge_section = (
         "\n\nBackground knowledge. Use it when the person asks about these topics, and keep its facts "
         "exactly as written. For every other topic use your general knowledge:\n"
@@ -248,6 +261,7 @@ class Conversation:
         motion_descriptions: Mapping[str, str] | None = None,
         retriever: ContextRetriever | None = None,
         command_matcher: CommandMatcherLike | None = None,
+        surroundings: Callable[[], str | None] | None = None,
     ) -> None:
         """``motion_descriptions`` enables walking (None = the robot stands in place).
 
@@ -256,6 +270,7 @@ class Conversation:
         """
         self._retriever = retriever
         self._command_matcher = command_matcher
+        self._surroundings = surroundings  # what the head camera sees now (see scene_context.py)
         self._backend = backend
         self._robot_name = robot_name
         self._gesture_descriptions = dict(gesture_descriptions)
@@ -314,11 +329,14 @@ class Conversation:
                 self._retriever.context_for(user_text) if self._retriever else self._background_knowledge,
                 self._clock(),
                 self._motion_descriptions,
+                self._surroundings() if self._surroundings else None,
             ),
         }
         question = quote_user(user_text)
         if calculation := find_arithmetic(user_text):
             question += f"\n(Calculator: {calculation}. If the person asked for this calculation, use exactly this result.)"
+        if self._surroundings is not None and is_about_the_view(user_text) and (view := self._surroundings()):
+            question += f"\n(Camera view right now: {view.rstrip('.')}. Answer from this view only.)"
         return [system, *self._example_messages, *self._history, {"role": "user", "content": question}]
 
     def _matched_command(self, user_text: str, candidates: Sequence[str]) -> str | None:
@@ -369,13 +387,17 @@ class Conversation:
         if calculation and re.fullmatch(r"[\d.,\s-]+\.?", response.reply):
             response = replace(response, reply=spoken_calculation(calculation))
 
-        answer = _answer_json(response, self._motion_descriptions is not None)
-        self._history += [
-            {"role": "user", "content": quote_user(user_text)},
-            {"role": "assistant", "content": answer},
-        ]
-        self._history = self._history[-2 * self._history_turns :]
-        if self._retriever is not None:
+        # an answer about what the camera sees right now goes out of date as soon as something moves: it is kept
+        # neither in the chat history (the model would repeat it for the next thing shown) nor in long-term memory
+        about_the_view = self._surroundings is not None and is_about_the_view(user_text)
+        if not about_the_view:
+            answer = _answer_json(response, self._motion_descriptions is not None)
+            self._history += [
+                {"role": "user", "content": quote_user(user_text)},
+                {"role": "assistant", "content": answer},
+            ]
+            self._history = self._history[-2 * self._history_turns :]
+        if self._retriever is not None and not about_the_view:
             with timer.step("memory write"):
                 self._retriever.remember(user_text, response.reply)
         return response

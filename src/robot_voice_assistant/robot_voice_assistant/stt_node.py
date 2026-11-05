@@ -106,6 +106,8 @@ class SttNode(Node):
         self.create_timer(0.1, self._publish_level)
         self.create_timer(30.0, self._log_noise)
         self.create_subscription(Bool, "/voice/speaking", self._on_robot_speaking, 10)
+        # the robot greeted someone it saw walk up: they can answer without the wake word
+        self.create_subscription(String, "/vision/person_arrived", self._on_person_arrived, 10)
 
         self._recorder = subprocess.Popen(
             [
@@ -191,6 +193,10 @@ class SttNode(Node):
         if greeting is not None:
             self.get_logger().info(f"No question followed the wake word; answering {greeting!r}")
             self._transcript_pub.publish(String(data=greeting))
+
+    def _on_person_arrived(self, _msg: String) -> None:
+        self._wake_gate.start_conversation(time.monotonic())
+        self._report_conversation_state()
 
     def _report_conversation_state(self) -> None:
         if self._wake_gate.in_conversation == self._in_conversation:
