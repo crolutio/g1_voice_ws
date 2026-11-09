@@ -39,7 +39,16 @@ TASK = "R1-Walk-Plan-Flat-Play"  # foot planter + IK walk, balanced by the polic
 BEST_CHECKPOINT = "2026-11-05_10-59-32/model_5449.pt"
 
 
-def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool, wide_view: bool = False) -> None:
+# Newton viewer cameras, as (eye, lookat): close to the robot, the whole GITEX hall from above its entrance corner,
+# and the robot's Aideology stall from the aisle in front of it (the stall: x -2.8 to 2.2, y -4 to 4)
+NEWTON_VIEWS = {
+    "robot": ((3.0, -3.0, 1.6), (0.0, 0.0, 0.7)),
+    "hall": ((30.0, -24.0, 22.0), (7.0, 0.0, 0.0)),
+    "booth": ((5.2, -3.0, 2.4), (-0.4, 0.0, 1.0)),
+}
+
+
+def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool, view: str = "robot") -> None:
     """One robot, commands from ROS instead of random ones, no time limit, and the chosen viewer."""
 
     env_cfg.scene.num_envs = 1
@@ -64,8 +73,7 @@ def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool, wide_vie
     elif viewer == "newton_gl":
         from isaaclab_visualizers.newton.newton_visualizer_cfg import NewtonGLVisualizerCfg
 
-        # wide_view: the whole GITEX hall from above its entrance corner; else close to the robot
-        eye, lookat = ((30.0, -24.0, 22.0), (7.0, 0.0, 0.0)) if wide_view else ((3.0, -3.0, 1.6), (0.0, 0.0, 0.7))
+        eye, lookat = NEWTON_VIEWS[view]
         env_cfg.sim.visualizer_cfgs = [
             NewtonGLVisualizerCfg(window_width=1600, window_height=900, eye=eye, lookat=lookat)
         ]
@@ -86,6 +94,8 @@ def main() -> None:
     parser.add_argument("--gitex", action="store_true",
                         help="the GITEX exhibition hall (gitex_hall.py): booths, products, visitors walking, the head "
                              "camera on ROS; everything also drawn in the Newton viewer, seen whole from above")
+    parser.add_argument("--view", choices=["hall", "booth"], default="hall",
+                        help="with --gitex: the Newton viewer camera, on the whole hall or on the robot's stall")
     parser.add_argument("--visitors", type=int, default=10, help="with --gitex: how many visitors walk the hall")
     parser.add_argument("--people", type=int, default=2, help="with --surroundings: how many people walk past")
     parser.add_argument("--no-follow", action="store_true", help="do not move the camera with the robot")
@@ -98,7 +108,7 @@ def main() -> None:
         args_cli.enable_cameras = True  # the head camera needs rendering, also without a window
     check_rsl_rl_version()
     env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent, play_mode=True)
-    configure_for_deployment(env_cfg, viewer, follow_camera=not own_args.no_follow, wide_view=own_args.gitex)
+    configure_for_deployment(env_cfg, viewer, follow_camera=not own_args.no_follow, view=own_args.view if own_args.gitex else "robot")
     if own_args.surroundings or own_args.gitex:
         from surroundings import CAMERA_PERIOD_S, configure_head_camera
 

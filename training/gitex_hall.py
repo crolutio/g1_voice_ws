@@ -218,19 +218,12 @@ class GitexHall:
             self._reference(f"/World/GITEX/visitors/v{n}", path, (0, 0, 0), 0)
             self._visitors.append((visitor, f"/World/GITEX/visitors/v{n}", texture))
         self._uvs = region_uvs(self._cycle.regions)
-        # for the Newton viewer: all visitors as one mesh (one upload per frame), coloured from one texture with a
-        # row per visitor and a column per body region (shoes, trousers, shirt, skin)
+        # for the Newton viewer: one plain-coloured mesh per clothing colour, shared by all visitors (its texture path
+        # draws them white), filled each frame from all the visitors' points
         count = len(self._visitors)
-        atlas = np.concatenate([outfit_texture(*OUTFITS[n % len(OUTFITS)]) for n in range(count)], axis=0)
-        self._atlas = os.path.join(ASSET_DIR, "outfits_atlas.png")
-        from PIL import Image
-
-        Image.fromarray(atlas).save(self._atlas)
         points_each = len(self._cycle.frames[0])
-        self._all_indices = np.concatenate([self._cycle.indices + n * points_each for n in range(count)]).astype(np.int32)
-        self._all_uvs = np.concatenate([
-            np.stack([self._uvs[:, 0], np.full(points_each, (n + 0.5) / count, np.float32)], axis=1) for n in range(count)
-        ]).astype(np.float32)
+        self._colour_groups = visitor_colour_groups(self._cycle.indices, self._cycle.regions,
+                                                    [OUTFITS[n % len(OUTFITS)] for n in range(count)], points_each)
         self._all_points = np.zeros((count * points_each, 3), dtype=np.float32)
         self._last_frames: dict[int, int] = {}
         self._time = 0.0
@@ -416,9 +409,8 @@ class GitexHall:
                 world[:, 1] = y + s * points[:, 0] + c * points[:, 1]
                 world[:, 2] = points[:, 2]
         if viewer and self._newton is not None and self._visitors:
-            self._log("/gitex/visitors", self._all_points, self._all_indices, (1.0, 1.0, 1.0), 0.8, uvs=self._all_uvs,
-                      texture=self._atlas, dynamic=True)
-            self._enable_texture("/gitex/visitors")
+            for number, (colour, vertex_ids, local) in enumerate(self._colour_groups):
+                self._log(f"/gitex/visitors_{number}", self._all_points[vertex_ids], local, colour, 0.8, dynamic=True)
 
     def _enable_texture(self, name: str) -> None:
         """Newton's log_mesh loads a mesh's texture but never turns on texturing (the material's 4th value), so
@@ -431,6 +423,26 @@ class GitexHall:
         if mesh is not None and mesh.material[3] != 1.0:
             roughness, metallic, checker, _ = mesh.material
             mesh.material = (roughness, metallic, checker, 1.0)
+
+
+def visitor_colour_groups(indices: np.ndarray, regions: np.ndarray, outfits: list, points_each: int) -> list[tuple]:
+    """Split all visitors' triangles by clothing colour: ``[(colour, vertex ids into all visitors' points, triangle
+    indices into those vertices)]``. Visitor ``n`` wears ``outfits[n]`` (a colour per body region) and owns points
+    ``n * points_each`` to ``(n + 1) * points_each``; a triangle takes the region of its first point."""
+    triangles = indices.reshape(-1, 3)
+    triangle_region = regions[triangles[:, 0]]
+    by_colour: dict[tuple, list[np.ndarray]] = {}
+    for n, outfit in enumerate(outfits):
+        for region, colour in enumerate(outfit):
+            chosen = triangles[triangle_region == region]
+            if len(chosen):
+                by_colour.setdefault(tuple(colour), []).append(chosen + n * points_each)
+    groups = []
+    for colour, parts in by_colour.items():
+        tris = np.concatenate(parts)
+        vertex_ids, local = np.unique(tris.ravel(), return_inverse=True)
+        groups.append((colour, vertex_ids.astype(np.int64), local.astype(np.int32)))
+    return groups
 
 def stage_meshes(stage, root: str) -> list[tuple]:
     """Every mesh under ``root`` in world coordinates, for the Newton viewer: (points, indices, colour, roughness,

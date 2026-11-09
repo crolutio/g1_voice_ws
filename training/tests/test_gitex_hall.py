@@ -38,3 +38,23 @@ def test_visitors_keep_clear_of_the_robot_except_where_they_stop_to_look() -> No
             x, y, _, _ = visitor.pose(float(step))
             near_a_stop = any(math.dist((x, y), stop) < 1.0 for stop in stops)
             assert math.hypot(x, y) >= 1.2 or near_a_stop, (route, x, y)
+
+
+def test_visitors_are_split_into_one_mesh_per_clothing_colour() -> None:
+    from gitex_hall import visitor_colour_groups
+
+    # two visitors of 4 points each, two triangles each: one in region 0 (shoes), one in region 2 (shirt)
+    indices = np.array([0, 1, 2, 2, 3, 1], dtype=np.int32)
+    regions = np.array([0, 0, 2, 2], dtype=np.int8)
+    black, white, red = (0.1, 0.1, 0.1), (0.9, 0.9, 0.9), (0.8, 0.1, 0.1)
+    outfits = [(black, black, white, white), (black, black, red, red)]
+    groups = visitor_colour_groups(indices, regions, outfits, points_each=4)
+    colours = [colour for colour, _, _ in groups]
+    assert sorted(colours) == sorted([black, white, red])  # the shoes of both visitors share one mesh
+    triangles = 0
+    for colour, vertex_ids, local in groups:
+        assert local.max() < len(vertex_ids)
+        triangles += len(local) // 3
+        if colour == red:  # the second visitor's shirt: its points are offset by one visitor
+            assert set(vertex_ids.tolist()) == {5, 6, 7}
+    assert triangles == 4  # every triangle of every visitor drawn exactly once
