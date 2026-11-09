@@ -20,7 +20,7 @@ from std_msgs.msg import String
 
 OBJECTS = ["apple", "banana", "mug", "bottle", "scissors"]
 SHOW_S = 6.0  # wall-clock seconds each object is held up
-WATCH_S = 40.0  # then watch people walking past for this long
+WATCH_S = 150.0  # then watch people walking past: a full visitor loop (about 55 s simulated, at 40% of real time)
 
 
 class VisionChecker(Node):

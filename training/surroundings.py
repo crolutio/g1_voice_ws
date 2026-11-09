@@ -121,13 +121,15 @@ class _Walker:
 class Surroundings:
     """People and objects around the robot. Call step(dt, robot_xy, robot_yaw) every control step."""
 
-    def __init__(self, stage, origin: tuple[float, float], people: int = 2, seed: int = 0) -> None:
+    def __init__(self, stage, origin: tuple[float, float], people: int = 2, seed: int = 0, room: bool = True) -> None:
+        """``room``: the small room (a table with products, things on the floor); off inside the GITEX hall."""
         self._stage = stage
         self._origin = origin
         self._random = random.Random(seed)
         self._walkers: list[_Walker] = []
         self._shown: str | None = None
-        self._build_room()
+        if room:
+            self._build_room()
         for index in range(people):
             path = f"/World/People/person_{index}"
             self._add_person(path, PEOPLE[index % len(PEOPLE)])

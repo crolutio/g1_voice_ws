@@ -11,6 +11,7 @@ gesture_node) moves the arms and waist, as in the standing scene; an arm doing a
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import os
 import sys
@@ -31,12 +32,14 @@ from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, create_rsl_rl_runner, handle_
 from isaaclab_rl.rsl_rl import check_rsl_rl_version  # noqa: E402
 from isaaclab_tasks.utils import get_checkpoint_path, resolve_task_config  # noqa: E402
 
+PROFILE = os.environ.get("WALK_SCENE_PROFILE") == "1"
+VIEWER_EVERY = 2  # with the head camera: redraw the Newton viewer every 2nd control step (25 Hz)
 TASK = "R1-Walk-Plan-Flat-Play"  # foot planter + IK walk, balanced by the policy
 # The tested policy (no falls in test_falls.py and test_gesture_balance.py); newer runs are not used until tested.
 BEST_CHECKPOINT = "2026-11-05_10-59-32/model_5449.pt"
 
 
-def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool) -> None:
+def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool, wide_view: bool = False) -> None:
     """One robot, commands from ROS instead of random ones, no time limit, and the chosen viewer."""
 
     env_cfg.scene.num_envs = 1
@@ -61,8 +64,10 @@ def configure_for_deployment(env_cfg, viewer: str, follow_camera: bool) -> None:
     elif viewer == "newton_gl":
         from isaaclab_visualizers.newton.newton_visualizer_cfg import NewtonGLVisualizerCfg
 
+        # wide_view: the whole GITEX hall from above its entrance corner; else close to the robot
+        eye, lookat = ((30.0, -24.0, 22.0), (7.0, 0.0, 0.0)) if wide_view else ((3.0, -3.0, 1.6), (0.0, 0.0, 0.7))
         env_cfg.sim.visualizer_cfgs = [
-            NewtonGLVisualizerCfg(window_width=1280, window_height=720, eye=(3.0, -3.0, 1.6), lookat=(0.0, 0.0, 0.7))
+            NewtonGLVisualizerCfg(window_width=1600, window_height=900, eye=eye, lookat=lookat)
         ]
 
 
@@ -78,6 +83,10 @@ def main() -> None:
     )
     parser.add_argument("--surroundings", action="store_true",
                         help="head camera on ROS, people walking past and objects around (surroundings.py)")
+    parser.add_argument("--gitex", action="store_true",
+                        help="the GITEX exhibition hall (gitex_hall.py): booths, products, visitors walking, the head "
+                             "camera on ROS; everything also drawn in the Newton viewer, seen whole from above")
+    parser.add_argument("--visitors", type=int, default=10, help="with --gitex: how many visitors walk the hall")
     parser.add_argument("--people", type=int, default=2, help="with --surroundings: how many people walk past")
     parser.add_argument("--no-follow", action="store_true", help="do not move the camera with the robot")
     own_args, launcher_args = parser.parse_known_args()
@@ -85,15 +94,19 @@ def main() -> None:
     viewer = "none" if own_args.headless else own_args.viewer
     argv = ["--task", TASK, "--num_envs", "1", "--viz", viewer, *launcher_args]
     args_cli = _parse_args([*argv, "physics=isaacsim_physx"])
-    if own_args.surroundings:
+    if own_args.surroundings or own_args.gitex:
         args_cli.enable_cameras = True  # the head camera needs rendering, also without a window
     check_rsl_rl_version()
     env_cfg, agent_cfg = resolve_task_config(args_cli.task, args_cli.agent, play_mode=True)
-    configure_for_deployment(env_cfg, viewer, follow_camera=not own_args.no_follow)
-    if own_args.surroundings:
-        from surroundings import configure_head_camera
+    configure_for_deployment(env_cfg, viewer, follow_camera=not own_args.no_follow, wide_view=own_args.gitex)
+    if own_args.surroundings or own_args.gitex:
+        from surroundings import CAMERA_PERIOD_S, configure_head_camera
 
         configure_head_camera(env_cfg)
+        # Isaac Sim's renderer only renders as often as the head camera needs (5 Hz, not at every 50 Hz control
+        # step): rendering every step kept the GPU so busy it overheated and slowed to a crawl. The Newton viewer
+        # is still updated every control step (below).
+        env_cfg.sim.render_interval = round(CAMERA_PERIOD_S / env_cfg.sim.dt)
 
     with launch_simulation(env_cfg, args_cli), contextlib.ExitStack() as cleanup:
         import torch
@@ -127,8 +140,20 @@ def main() -> None:
         bridge = WalkRosBridge()
         heading_hold = HeadingHold()  # walking straight keeps the heading it started with
         cleanup.callback(bridge.shutdown)
-        surroundings = camera = None
-        if own_args.surroundings:
+        surroundings = camera = hall = None
+        if own_args.gitex:
+            from gitex_hall import GitexHall
+            from surroundings import Surroundings
+
+            origin = base_env.scene.env_origins[0, :2].tolist()
+            newton = next((v for v in base_env.sim.visualizers if hasattr(v, "log_mesh")), None)
+            hall = GitexHall(base_env.sim.stage, (origin[0], origin[1]), newton=newton, visitors=own_args.visitors)
+            surroundings = Surroundings(base_env.sim.stage, (origin[0], origin[1]), people=0, room=False)
+            camera = base_env.scene.sensors["head_camera"]
+            last_image_time = -1.0
+            print(f"[walk_scene] GITEX hall ready ({own_args.visitors} visitors; Newton viewer: "
+                  f"{'yes' if newton is not None else 'no'}).", flush=True)
+        elif own_args.surroundings:
             from surroundings import Surroundings
 
             origin = base_env.scene.env_origins[0, :2].tolist()
@@ -140,6 +165,9 @@ def main() -> None:
         sim_time = 0.0
         obs = env.get_observations()
         report_wall, report_sim = time.monotonic(), 0.0
+        timings: dict[str, float] = collections.defaultdict(float)
+        step_count = 0
+        steps_per_render = max(1, env_cfg.sim.render_interval // env_cfg.decimation)
         print("[walk_scene] Walking. Listening on /cmd_vel and /robot/joint_command.", flush=True)
         while True:
             started = time.monotonic()
@@ -160,10 +188,19 @@ def main() -> None:
                     joint_ids=[joint_index[name] for name in targets],
                     env_ids=env_ids,
                 )
+            mark = time.monotonic()
             with torch.inference_mode():
                 obs, _, dones, _ = env.step(policy(obs))
                 policy.reset(dones)
             sim_time += step_dt
+            timings["env step"] += time.monotonic() - mark
+            step_count += 1
+            render_next = step_count % steps_per_render == steps_per_render - 1  # the camera renders next step
+            viewer_now = step_count % VIEWER_EVERY == 0
+            if camera is not None and viewer_now:  # rendering is sparse (render_interval): update the viewer here
+                mark = time.monotonic()
+                base_env.sim.update_visualizers(step_dt * VIEWER_EVERY, skip_app_pumping=True)
+                timings["newton viewer"] += time.monotonic() - mark
 
             data = robot.data
             bridge.publish(
@@ -177,15 +214,27 @@ def main() -> None:
             )
             if surroundings is not None:
                 surroundings.step(step_dt)
-                for name in bridge.show_requests():
+                requests = bridge.show_requests()
+                for name in requests:
                     robot_xy = tuple(robot.data.root_pos_w.torch[0, :2].tolist())
                     print(f"[walk_scene] Showing: {surroundings.show(name, robot_xy, yaw)}", flush=True)
+                if hall is not None:  # after the show requests, so the viewer gets what is on the stand now
+                    mark = time.monotonic()
+                    hall.step(step_dt, shown_changed=bool(requests), stage=render_next, viewer=viewer_now)
+                    timings["hall (visitors)"] += time.monotonic() - mark
                 if sim_time - last_image_time >= camera.cfg.update_period:
+                    mark = time.monotonic()
                     bridge.publish_image(sim_time, camera.data.output["rgb"].torch[0, ..., :3].cpu().numpy())
                     last_image_time = sim_time
+                    timings["camera image"] += time.monotonic() - mark
             if time.monotonic() - report_wall >= 5.0:
                 speed = (sim_time - report_sim) / (time.monotonic() - report_wall)
                 print(f"[walk_scene] simulation speed {speed:.0%} of real time", flush=True)
+                if PROFILE:  # where the time of a step goes (WALK_SCENE_PROFILE=1)
+                    steps = max(1, round((sim_time - report_sim) / step_dt))
+                    print("[walk_scene] per step: " + ", ".join(f"{k} {1000 * v / steps:.1f} ms" for k, v in timings.items()),
+                          flush=True)
+                timings.clear()
                 report_wall, report_sim = time.monotonic(), sim_time
             # Run no faster than real time, so speeds and gestures look natural.
             time.sleep(max(0.0, step_dt - (time.monotonic() - started)))

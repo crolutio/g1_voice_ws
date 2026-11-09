@@ -23,7 +23,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 
 from robot_voice_assistant.node_runner import run_node
-from robot_voice_assistant.scene_context import Detection, PersonGreeter, describe_scene, merge_detections
+from robot_voice_assistant.scene_context import Detection, PersonGreeter, describe_scene, merge_detections, people_nearby
 
 # Things the robot should recognise; YOLO-World finds any of these words, no training needed.
 DEFAULT_VOCABULARY = [
@@ -89,7 +89,7 @@ class VisionNode(Node):
                 if scene != last_scene:
                     self.get_logger().info(f"I see: {scene}")
                     last_scene = scene
-                if self._greeter.update(time.monotonic(), any(d.label == "person" for d in detections)):
+                if self._greeter.update(time.monotonic(), people_nearby(detections)):
                     self.get_logger().info("A person walked up; greeting them.")
                     self._person_pub.publish(String(data="person"))
             time.sleep(max(0.0, self._period - (time.monotonic() - started)))

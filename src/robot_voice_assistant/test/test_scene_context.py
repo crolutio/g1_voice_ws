@@ -1,4 +1,4 @@
-from robot_voice_assistant.scene_context import Detection, PersonGreeter, describe_scene
+from robot_voice_assistant.scene_context import Detection, PersonGreeter, describe_scene, people_nearby
 
 
 def detection(label: str, x: float = 0.5, height: float = 0.3, confidence: float = 0.8) -> Detection:
@@ -27,20 +27,46 @@ def test_unsure_detections_are_left_out() -> None:
 
 def test_a_person_arriving_is_greeted_once() -> None:
     greeter = PersonGreeter(confirm_frames=2, absent_s=5.0, cooldown_s=20.0)
-    assert not greeter.update(0.0, person_visible=True)  # first glimpse: not yet sure
-    assert greeter.update(0.3, person_visible=True)  # seen twice: greet
-    assert not greeter.update(0.6, person_visible=True)  # still there: no second greeting
-    assert not greeter.update(3.0, person_visible=False)
+    assert not greeter.update(0.0, people_nearby=1)  # first glimpse: not yet sure
+    assert greeter.update(0.3, people_nearby=1)  # seen twice: greet
+    assert not greeter.update(0.6, people_nearby=1)  # still there: no second greeting
+    assert not greeter.update(3.0, people_nearby=0)
 
 
 def test_a_new_person_after_a_while_is_greeted_again_but_not_too_often() -> None:
     greeter = PersonGreeter(confirm_frames=2, absent_s=5.0, cooldown_s=20.0)
-    greeter.update(0.0, True), greeter.update(0.3, True)
-    greeter.update(1.0, False)
-    assert not (greeter.update(8.0, True) or greeter.update(8.3, True))  # gone 7 s, but within the 20 s cooldown
-    greeter.update(9.0, False)
-    assert not greeter.update(30.0, True)
-    assert greeter.update(30.3, True)  # gone long enough and past the cooldown
+    greeter.update(0.0, 1), greeter.update(0.3, 1)
+    greeter.update(1.0, 0)
+    assert not (greeter.update(8.0, 1) or greeter.update(8.3, 1))  # gone 7 s, but within the 20 s cooldown
+    greeter.update(9.0, 0)
+    assert not greeter.update(30.0, 1)
+    assert greeter.update(30.3, 1)  # gone long enough and past the cooldown
+
+
+def test_only_people_who_come_close_count_not_the_crowd_behind() -> None:
+    crowd = [detection("person", height=0.12), detection("person", height=0.29), detection("apple", height=0.5)]
+    assert people_nearby(crowd) == 0
+    assert people_nearby(crowd + [detection("person", height=0.4)]) == 1
+
+
+def test_in_a_busy_hall_each_new_person_walking_up_is_greeted() -> None:
+    greeter = PersonGreeter(confirm_frames=2, absent_s=5.0, cooldown_s=10.0)
+    greeter.update(0.0, 1), greeter.update(0.5, 1)  # the first visitor is greeted
+    assert not greeter.update(5.0, 1)  # still talking to them
+    assert not greeter.update(12.0, 2)  # a second one walks up: first glimpse
+    assert greeter.update(12.5, 2)  # greeted, though the first never left
+    assert not greeter.update(13.0, 2)
+    for t in (14.0, 16.0, 19.5):
+        greeter.update(t, 1)  # one leaves and stays gone
+    assert not greeter.update(25.0, 2) and greeter.update(25.5, 2)  # the next newcomer is greeted too
+
+
+def test_a_crowd_flickering_in_and_out_of_view_is_not_greeted_twice() -> None:
+    greeter = PersonGreeter(confirm_frames=2, absent_s=5.0, cooldown_s=10.0)
+    assert any([greeter.update(float(t), 2) for t in range(11)])  # two people stay in front for 10 s
+    for t in (11.0, 12.0, 13.0):
+        greeter.update(t, 1)  # one is hidden for a moment
+    assert not any(greeter.update(t, 2) for t in (14.0, 14.5, 15.0))  # back within 5 s: the same people
 
 
 def test_the_prompt_tells_the_robot_what_it_sees() -> None:

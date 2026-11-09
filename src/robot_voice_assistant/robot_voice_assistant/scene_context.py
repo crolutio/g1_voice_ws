@@ -104,30 +104,45 @@ def is_about_the_view(question: str) -> bool:
     return bool(_ABOUT_THE_VIEW.search(question))
 
 
+NEARBY_HEIGHT = 0.33  # a person this tall in the image has walked up to the robot; smaller ones walk past behind
+
+
+def people_nearby(detections: list[Detection]) -> int:
+    """How many people stand close enough to be talking to the robot (not the crowd in the background)."""
+    return sum(1 for d in detections if d.label == "person" and d.height >= NEARBY_HEIGHT)
+
+
 class PersonGreeter:
-    """Greets a person who walks up: once they are seen for ``confirm_frames`` updates in a row, after nobody was
-    seen for ``absent_s`` seconds, and at most once every ``cooldown_s`` seconds."""
+    """Greets each person who walks up, also when others are already there (a busy expo hall): once more people are
+    nearby than were greeted, for ``confirm_frames`` updates in a row, and at most once every ``cooldown_s``
+    seconds. Someone counts as gone once fewer people were nearby for ``absent_s`` seconds, so a person hidden
+    for a moment is not greeted again."""
 
-    def __init__(self, confirm_frames: int = 2, absent_s: float = 5.0, cooldown_s: float = 20.0) -> None:
+    def __init__(self, confirm_frames: int = 2, absent_s: float = 5.0, cooldown_s: float = 10.0) -> None:
         self.confirm_frames, self.absent_s, self.cooldown_s = confirm_frames, absent_s, cooldown_s
+        self._greeted = 0  # people nearby when the robot last greeted (and still there)
+        self._fewest = 0  # fewest people nearby while there were fewer than greeted
+        self._last_all_there: float | None = None  # last time everyone greeted was still nearby
         self._seen_frames = 0
-        self._last_seen: float | None = None
         self._last_greeting: float | None = None
-        self._greeted_this_visit = False
 
-    def update(self, now: float, person_visible: bool) -> bool:
+    def update(self, now: float, people_nearby: int) -> bool:
         """True when the robot should greet now."""
-        if not person_visible:
+        if people_nearby < self._greeted:
+            self._fewest = min(self._fewest, people_nearby)
             self._seen_frames = 0
             return False
-        if self._last_seen is not None and now - self._last_seen >= self.absent_s:
-            self._greeted_this_visit = False  # gone long enough: this is a new visit
-        self._last_seen = now
+        if self._last_all_there is not None and self._fewest < self._greeted \
+                and now - self._last_all_there >= self.absent_s:
+            self._greeted = self._fewest  # the ones missing that long have left
+        self._fewest, self._last_all_there = people_nearby, now
+        if people_nearby <= self._greeted:
+            self._seen_frames = 0
+            return False
         self._seen_frames += 1
-        if self._greeted_this_visit or self._seen_frames < self.confirm_frames:
+        if self._seen_frames < self.confirm_frames:
             return False
         if self._last_greeting is not None and now - self._last_greeting < self.cooldown_s:
             return False
-        self._greeted_this_visit = True
-        self._last_greeting = now
+        self._greeted, self._last_greeting, self._seen_frames = people_nearby, now, 0
         return True
