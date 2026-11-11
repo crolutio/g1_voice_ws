@@ -13,7 +13,7 @@ from robot_voice_assistant.arithmetic import find_arithmetic, spoken_calculation
 from robot_voice_assistant.assistant_response import NO_GESTURE, NO_MOTION, AssistantResponse, parse_assistant_response
 from robot_voice_assistant.llm_backends import ChatBackend
 from robot_voice_assistant.ollama_client import ChatMessage, build_response_schema
-from robot_voice_assistant.scene_context import is_about_the_view
+from robot_voice_assistant.scene_context import NOTHING_SEEN_HELD, about_their_hand_unseen, is_about_the_view
 from robot_voice_assistant.timing import StepTimer
 
 # Small models sometimes close the JSON string right before "'t" ("I don", "it isn").
@@ -200,7 +200,7 @@ def build_system_prompt(
             f"{surroundings.strip().rstrip('.')}. This is the current view: it replaces anything you saw or said "
             "earlier in the conversation, because things are moved and people walk by. Use it when the person asks "
             "what you see, what something is, or who is there; something they show you is usually right in front of "
-            "you. Name only what is listed here; if it is not listed, say you cannot see it clearly. Do not mention "
+            "you, and \"a person ... holding X\" is what the person talking to you has in their hand. Name only what is listed here; if it is not listed, say you cannot see it clearly. Do not mention "
             "it otherwise.\n\n"
         )
     knowledge_section = (
@@ -337,6 +337,8 @@ class Conversation:
             question += f"\n(Calculator: {calculation}. If the person asked for this calculation, use exactly this result.)"
         if self._surroundings is not None and is_about_the_view(user_text) and (view := self._surroundings()):
             question += f"\n(Camera view right now: {view.rstrip('.')}. Answer from this view only.)"
+            if about_their_hand_unseen(user_text, view):
+                question += f"\n({NOTHING_SEEN_HELD})"
         return [system, *self._example_messages, *self._history, {"role": "user", "content": question}]
 
     def _matched_command(self, user_text: str, candidates: Sequence[str]) -> str | None:

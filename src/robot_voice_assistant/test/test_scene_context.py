@@ -1,3 +1,5 @@
+import pytest
+
 from robot_voice_assistant.scene_context import Detection, PersonGreeter, describe_scene, people_nearby
 
 
@@ -67,6 +69,34 @@ def test_a_crowd_flickering_in_and_out_of_view_is_not_greeted_twice() -> None:
     for t in (11.0, 12.0, 13.0):
         greeter.update(t, 1)  # one is hidden for a moment
     assert not any(greeter.update(t, 2) for t in (14.0, 14.5, 15.0))  # back within 5 s: the same people
+
+
+def boxed(label: str, box: tuple[float, float, float, float], confidence: float = 0.8) -> Detection:
+    return Detection(label, confidence, (box[0] + box[2]) / 2, box[3] - box[1], box)
+
+
+def test_an_object_in_the_hand_of_a_visitor_in_front_is_said_to_be_held() -> None:
+    visitor = boxed("person", (0.35, 0.0, 0.75, 1.0))
+    apple = boxed("apple", (0.40, 0.45, 0.48, 0.55))
+    screen = boxed("television", (0.80, 0.1, 0.98, 0.3))
+    text = describe_scene([visitor, apple, screen])
+    assert "a person right in front of you, close, holding an apple" in text
+    assert "a television on your right" in text
+    assert text.count("apple") == 1  # not listed a second time on its own
+
+
+def test_things_only_behind_someone_far_away_are_not_held() -> None:
+    far_person = boxed("person", (0.4, 0.3, 0.5, 0.55))  # small: walking past in the distance
+    mug = boxed("mug", (0.42, 0.4, 0.46, 0.45))
+    text = describe_scene([far_person, mug])
+    assert "holding" not in text and "a mug right in front of you" in text
+
+
+def test_a_question_about_my_hand_is_about_the_view() -> None:
+    from robot_voice_assistant.scene_context import is_about_the_view
+
+    assert is_about_the_view("Can you tell me what is in my hand?")
+    assert is_about_the_view("what have I got here")
 
 
 def test_the_prompt_tells_the_robot_what_it_sees() -> None:
@@ -168,3 +198,163 @@ def test_one_thing_given_two_names_is_said_once() -> None:
     cup = Detection("cup", 0.4, 0.5, 0.2, box=(0.41, 0.61, 0.55, 0.80))  # the other model's name for the same thing
     apple = Detection("apple", 0.7, 0.2, 0.2, box=(0.10, 0.60, 0.25, 0.80))
     assert sorted(d.label for d in merge_detections([[mug, apple], [cup]], ignore=set())) == ["apple", "mug"]
+
+
+def test_the_robot_looks_closer_at_each_person_who_walked_up() -> None:
+    from robot_voice_assistant.scene_context import closer_looks
+
+    far = boxed("person", (0.05, 0.3, 0.15, 0.55))
+    near = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    crops = closer_looks([far, boxed("chair", (0.7, 0.5, 0.9, 0.9)), near])
+    assert len(crops) == 1
+    crop = crops[0]
+    assert crop[0] < 0.30 and crop[2] > 0.60 and crop[1] == 0.0  # the person, with a margin
+    assert 0.52 < crop[3] < 0.65  # down to the waist: where hands hold things up to show them, not the legs
+    assert all(0.0 <= v <= 1.0 for v in crop)
+    assert closer_looks([far]) == []  # nobody has walked up
+
+
+def test_in_a_crowd_at_the_stall_every_close_person_is_looked_at() -> None:
+    from robot_voice_assistant.scene_context import closer_looks
+
+    # three visitors side by side, the one holding something not the tallest box (seen in the stall demo)
+    crowd = [boxed("person", (0.57, 0.0, 0.78, 0.67)), boxed("person", (0.42, 0.0, 0.62, 0.71)),
+             boxed("person", (0.26, 0.0, 0.47, 0.73)), boxed("person", (0.9, 0.0, 1.0, 0.5))]
+    crops = closer_looks(crowd, limit=3)
+    assert len(crops) == 3
+    assert any(crop[0] < 0.42 and crop[2] > 0.62 for crop in crops)  # the one in the middle too
+
+
+def test_what_is_seen_in_the_closer_look_is_placed_back_in_the_whole_view() -> None:
+    from robot_voice_assistant.scene_context import from_closer_look
+
+    in_crop = [boxed("apple", (0.25, 0.25, 0.75, 0.75)), boxed("person", (0.0, 0.0, 1.0, 1.0))]
+    back = from_closer_look(in_crop, (0.2, 0.0, 0.6, 0.8))
+    assert [d.label for d in back] == ["apple"]  # the person is already counted in the whole view
+    assert back[0].box == pytest.approx((0.3, 0.2, 0.5, 0.6))
+    assert back[0].x_center == pytest.approx(0.4) and back[0].height == pytest.approx(0.4)
+
+
+def test_what_a_visitor_holds_is_named_by_the_closer_classifier() -> None:
+    from robot_voice_assistant.scene_context import merge_detections, name_held_things
+
+    visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    apple = boxed("sports ball", (0.50, 0.10, 0.56, 0.18), confidence=0.69)  # YOLO's name for a red apple
+    far_ball = boxed("sports ball", (0.85, 0.50, 0.88, 0.53))
+    asked = []
+
+    def classify(box):
+        asked.append(box)
+        return {"apple": 0.6, "banana": 0.3, "mug": 0.1}
+
+    named = name_held_things([[visitor], [apple, far_ball]], classify)
+    assert asked == [apple.box]  # only what is in the hands of someone close
+    assert [d.label for d in named[1]] == ["apple", "sports ball"]
+    assert named[1][0].confidence == 0.69
+    merged = merge_detections(named, {"sports ball"})
+    assert sorted(d.label for d in merged) == ["apple", "person"]
+
+
+def test_the_classifier_renames_only_names_yolo_gets_wrong_for_held_things() -> None:
+    from robot_voice_assistant.scene_context import name_held_things
+
+    visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    scissors = boxed("tennis racket", (0.50, 0.10, 0.56, 0.18), confidence=0.42)
+    renamed = name_held_things([[visitor, scissors]], lambda _box: {"scissors": 0.49, "drill": 0.2})
+    assert renamed[0][1].label == "scissors"
+    asked = []
+    # a yellow mustard bottle: YOLO says bottle (0.37), CLIP banana (0.56), stall demo round 2
+    bottle = boxed("bottle", (0.50, 0.10, 0.56, 0.18), confidence=0.37)
+    kept = name_held_things([[visitor, bottle]], lambda box: asked.append(box) or {"banana": 0.56, "bottle": 0.29})
+    assert kept[0][1].label == "bottle" and asked == []  # a specific YOLO name is not second-guessed
+
+
+def test_an_unsure_classifier_changes_nothing() -> None:
+    from robot_voice_assistant.scene_context import name_held_things
+
+    visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    ball = boxed("sports ball", (0.50, 0.30, 0.56, 0.38), confidence=0.5)
+    unsure = name_held_things([[visitor, ball]], lambda _box: {"apple": 0.1, "banana": 0.09})
+    assert unsure[0][1].label == "sports ball"
+    assert name_held_things([[visitor, ball]], lambda _box: {})[0][1].label == "sports ball"  # box too small
+
+
+def test_asked_about_their_hand_with_nothing_seen_held_the_robot_is_told_not_to_guess() -> None:
+    from robot_voice_assistant.conversation import Conversation
+
+    sent: list[list[dict]] = []
+
+    class Backend:
+        def chat(self, messages, *_args, **_kwargs):
+            sent.append(messages)
+            return '{"reply": "I cannot make it out.", "gesture": "none", "motion": "none"}'
+
+    view = ["a person right in front of you, close; 3 people"]
+    conversation = Conversation(Backend(), "R1", {"none": "no gesture"}, motion_descriptions={"none": "no motion"},
+                                surroundings=lambda: view[0])
+    conversation.respond("Can you tell me what is in my hand?")
+    assert "cannot see anything in their hand" in sent[-1][-1]["content"]
+    view[0] = "a person right in front of you, close, holding an apple"
+    conversation.respond("What am I holding?")
+    assert "holding an apple" in sent[-1][-1]["content"]
+    assert "cannot see anything in their hand" not in sent[-1][-1]["content"]
+
+
+def test_what_a_close_visitor_holds_is_kept_through_a_missed_frame() -> None:
+    from robot_voice_assistant.scene_context import HeldObjectMemory
+
+    visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    apple = boxed("apple", (0.50, 0.10, 0.56, 0.18))
+    memory = HeldObjectMemory(keep_s=3.0)
+    assert memory.update(0.0, [visitor, apple]) == [visitor, apple]
+    kept = memory.update(1.0, [visitor])  # the detector missed the apple in this frame
+    assert "holding an apple" in describe_scene(kept)
+    assert "holding" not in describe_scene(memory.update(4.5, [visitor]))  # not seen for longer: let go
+
+
+def test_held_things_are_forgotten_when_the_visitor_walks_away() -> None:
+    from robot_voice_assistant.scene_context import HeldObjectMemory
+
+    visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    memory = HeldObjectMemory(keep_s=3.0)
+    memory.update(0.0, [visitor, boxed("mug", (0.50, 0.10, 0.56, 0.18))])
+    assert memory.update(1.0, []) == []  # nobody close: nothing held
+    assert "holding" not in describe_scene(memory.update(1.5, [visitor]))  # someone new walked up
+
+
+def test_one_frame_naming_the_held_thing_wrongly_is_outvoted() -> None:
+    from robot_voice_assistant.scene_context import HeldObjectMemory
+
+    visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
+
+    def holding(label: str) -> list:
+        return [visitor, boxed(label, (0.50, 0.10, 0.56, 0.18))]
+
+    memory = HeldObjectMemory(keep_s=3.0)
+    memory.update(0.0, holding("banana"))
+    memory.update(0.7, holding("banana"))
+    seen = describe_scene(memory.update(1.4, holding("apple")))  # CLIP got one frame wrong (stall demo, visit 1)
+    assert "holding a banana" in seen and "apple" not in seen
+    memory.update(2.1, holding("banana"))
+    assert "holding a banana" in describe_scene(memory.update(2.8, [visitor]))  # and a missed frame still counts
+
+
+def test_only_people_standing_in_front_of_the_robot_are_at_the_stall() -> None:
+    from robot_voice_assistant.scene_context import people_at_the_stall
+
+    in_front = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    passing_at_the_side = boxed("person", (0.82, 0.0, 1.0, 0.75))  # close, but walking past the edge of the view
+    far = boxed("person", (0.45, 0.3, 0.52, 0.55))
+    assert people_at_the_stall([in_front, passing_at_the_side, far]) == 1
+
+
+def test_a_visitor_who_stops_at_the_stall_is_greeted_after_someone_walked_past() -> None:
+    from robot_voice_assistant.scene_context import STALL_CONFIRM_FRAMES, people_at_the_stall
+
+    greeter = PersonGreeter(confirm_frames=STALL_CONFIRM_FRAMES)
+    passer = boxed("person", (0.40, 0.0, 0.62, 0.75))
+    visitor = boxed("person", (0.35, 0.0, 0.60, 0.80))
+    frames = [[], [passer], [passer], [], [], [], [], [], [], [], [], [], [], [], [visitor], [visitor], [visitor],
+              [visitor], [visitor]]
+    greeted = [t * 0.67 for t, seen in enumerate(frames) if greeter.update(t * 0.67, people_at_the_stall(seen))]
+    assert len(greeted) == 1 and greeted[0] >= 14 * 0.67  # the passer-by crossed in two frames: only the visitor
