@@ -32,6 +32,7 @@ class WalkRosBridge:
         self._velocity_time = 0.0
         self._upper_body: dict[str, float] = {}
         self._show_requests: list[str] = []
+        self._visit_requests: list[str] = []
 
         self._node.create_subscription(Twist, "/cmd_vel", self._on_cmd_vel, 10)
         self._node.create_subscription(JointState, "/robot/joint_command", self._on_joint_command, 10)
@@ -41,6 +42,9 @@ class WalkRosBridge:
         self._image_pub = self._node.create_publisher(Image, "/robot/camera/image_raw", 2)
         # "apple", "banana", ... or "none": hold that object up in front of the robot's camera (surroundings.py)
         self._node.create_subscription(String, "/scene/show", self._on_show, 10)
+        # GITEX hall: "apple", "banana", ... sends a visitor to the robot's stall holding it; "leave" sends them away
+        self._node.create_subscription(String, "/gitex/visit", self._on_visit, 10)
+        self._visit_state_pub = self._node.create_publisher(String, "/gitex/visit_state", 10)
         self._executor = rclpy.executors.SingleThreadedExecutor()
         self._executor.add_node(self._node)
 
@@ -58,6 +62,20 @@ class WalkRosBridge:
     def _on_show(self, msg: String) -> None:
         with self._lock:
             self._show_requests.append(msg.data)
+
+    def _on_visit(self, msg: String) -> None:
+        with self._lock:
+            self._visit_requests.append(msg.data.strip().lower())
+
+    def visit_requests(self) -> list[str]:
+        """Stall visits asked for on /gitex/visit since the last call."""
+        with self._lock:
+            requests, self._visit_requests = self._visit_requests, []
+        return requests
+
+    def publish_visit_state(self, state: str) -> None:
+        """Where the stall visitor is: "idle", "approaching apple", "at_stall apple", "leaving apple"."""
+        self._visit_state_pub.publish(String(data=state))
 
     def show_requests(self) -> list[str]:
         """Objects asked for on /scene/show since the last call."""

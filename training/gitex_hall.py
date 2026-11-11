@@ -7,6 +7,9 @@ Everything visible is built as triangle meshes (mesh_kit) and shown twice from t
 The robot stands in the Aideology booth at the origin, facing +x onto the main aisle. Visitors are NVIDIA's biped
 character walking (skinned_people), each in their own clothes, on looping routes along the aisles (visitors.py);
 some stop in front of the robot. /scene/show still puts a product on the small stand in front of the robot.
+
+A test visitor (stall_visit.py) can be sent to the stall carrying one of HELD_COLOURS' objects: request_visit(name)
+walks them up from the aisle to stand in front of the robot holding it out, end_visit() sends them away.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import numpy as np
 
 from mesh_kit import MeshPart, box, cylinder, merge_by_colour, sphere, triangulate
 from skinned_people import load_walk_cycle, outfit_texture, region_uvs
+from stall_visit import StallVisit, VisitPose, hand_track, hold_out_pose
 from visitors import Visitor, Waypoint
 
 ASSET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "gitex")
@@ -37,6 +41,10 @@ LEAVES = (0.2, 0.5, 0.18)
 GITEX_GREEN = (0.0, 0.75, 0.45)
 BRANDS = [(0.0, 0.55, 0.6), (0.9, 0.45, 0.05), (0.15, 0.6, 0.25), (0.8, 0.12, 0.2), (0.1, 0.3, 0.75),
           (0.95, 0.75, 0.1), (0.55, 0.2, 0.55), (0.2, 0.2, 0.25)]
+# what a visitor to the robot's stall can bring (surroundings.SHOWABLE), and its plain colour in the Newton viewer
+HELD_COLOURS = {"apple": (0.72, 0.06, 0.06), "banana": (0.95, 0.85, 0.2), "mug": (0.8, 0.12, 0.1),
+                "bottle": (0.95, 0.78, 0.08), "scissors": (0.15, 0.3, 0.8)}
+HIDDEN_Z = -50.0  # where things not in the hall wait (under the floor)
 SCREEN_CONTENT = [(0.15, 0.55, 0.95), (0.95, 0.35, 0.55), (0.25, 0.85, 0.65), (0.98, 0.7, 0.2)]
 OUTFITS = [  # shoes, trousers, shirt, skin
     ((0.1, 0.1, 0.1), (0.15, 0.2, 0.35), (0.9, 0.9, 0.92), (0.87, 0.68, 0.55)),
@@ -218,13 +226,14 @@ class GitexHall:
             self._reference(f"/World/GITEX/visitors/v{n}", path, (0, 0, 0), 0)
             self._visitors.append((visitor, f"/World/GITEX/visitors/v{n}", texture))
         self._uvs = region_uvs(self._cycle.regions)
-        # for the Newton viewer: one plain-coloured mesh per clothing colour, shared by all visitors (its texture path
-        # draws them white), filled each frame from all the visitors' points
         count = len(self._visitors)
+        self._add_stall_visitor(count, ox, oy)
+        # for the Newton viewer: one plain-coloured mesh per clothing colour, shared by all visitors (its texture path
+        # draws them white), filled each frame from all the visitors' points (the stall visitor last)
         points_each = len(self._cycle.frames[0])
         self._colour_groups = visitor_colour_groups(self._cycle.indices, self._cycle.regions,
-                                                    [OUTFITS[n % len(OUTFITS)] for n in range(count)], points_each)
-        self._all_points = np.zeros((count * points_each, 3), dtype=np.float32)
+                                                    [OUTFITS[n % len(OUTFITS)] for n in range(count + 1)], points_each)
+        self._all_points = np.zeros(((count + 1) * points_each, 3), dtype=np.float32)
         self._last_frames: dict[int, int] = {}
         self._time = 0.0
         self._static_logged = False
@@ -337,6 +346,89 @@ class GitexHall:
                 paths.append(path)
         return paths
 
+    def _add_stall_visitor(self, n: int, ox: float, oy: float) -> None:
+        """The test visitor (hidden until sent) and the objects they can carry (hidden until carried)."""
+        from pxr import UsdGeom
+
+        from surroundings import SHOWABLE, apple_usd
+
+        texture = os.path.join(ASSET_DIR, f"outfit_{n}.png")
+        from PIL import Image
+
+        Image.fromarray(outfit_texture(*OUTFITS[n % len(OUTFITS)])).save(texture)
+        self._stall_path = "/World/GITEX/stall_visitor"
+        self._reference(self._stall_path, self._write_visitor_usd(n, texture), (0, 0, HIDDEN_Z), 0)
+        UsdGeom.Imageable(self._stage.GetPrimAtPath(self._stall_path)).MakeInvisible()
+        standing = self._cycle.frames[self._cycle.standing_frame]
+        self._hold_points, hand_ids, self._hold_hand = hold_out_pose(standing)
+        self._hand_track = hand_track(self._cycle.frames, hand_ids)
+        # they stand a little to the robot's left, so the object in their left hand is in the middle of its view
+        self._visit = StallVisit(entry=(ox + 4.6, oy - 5.0), stop=(ox + 1.5, oy + 0.27), exit=(ox + 4.6, oy + 5.0),
+                                 robot=(ox, oy), speed=self._cycle.walk_speed, cycle_m=self._cycle.cycle_m,
+                                 frames=len(self._cycle.frames), standing_frame=self._cycle.standing_frame,
+                                 max_stay_s=60.0)
+        self._visit_pose = VisitPose("idle")
+        self._held: dict[str, tuple] = {}  # name: (prim path, centre offset from its origin, Newton mesh)
+        cache = UsdGeom.BBoxCache(0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+        for name in HELD_COLOURS:
+            url, upright = SHOWABLE[name]
+            path = f"/World/GITEX/held/{name}"
+            self._reference(path, apple_usd() if url == "apple" else url, (0, 0, HIDDEN_Z), 0, rotate_x=upright)
+            centre = np.array(cache.ComputeWorldBound(self._stage.GetPrimAtPath(path)).ComputeAlignedRange().GetMidpoint())
+            offset = centre - np.array([0.0, 0.0, HIDDEN_Z])
+            pieces = stage_meshes(self._stage, path)
+            points = np.concatenate([piece[0] for piece in pieces]) - centre  # around its middle
+            indices, start = [], 0
+            for piece in pieces:
+                indices.append(piece[1] + start)
+                start += len(piece[0])
+            self._held[name] = (path, offset, points.astype(np.float32), np.concatenate(indices).astype(np.int32))
+            UsdGeom.Imageable(self._stage.GetPrimAtPath(path)).MakeInvisible()
+        self._shown_held: str | None = None
+
+    def request_visit(self, held: str) -> bool:
+        """Send the test visitor to the stall carrying ``held`` (a HELD_COLOURS name); False if one is there."""
+        return held in HELD_COLOURS and self._visit.request(held, self._time)
+
+    def end_visit(self) -> None:
+        self._visit.leave(self._time)
+
+    def visit_state(self) -> str:
+        """ "idle", or the visitor's state and what they carry, e.g. "at_stall apple"."""
+        pose = self._visit_pose
+        return pose.state if pose.state == "idle" else f"{pose.state} {pose.held}"
+
+    def _stall_visitor_points(self, pose: VisitPose) -> tuple[np.ndarray, object, np.ndarray]:
+        """(body points in the character's frame, a key for the body shape, the hand in the character's frame)."""
+        if pose.frame is None:
+            return self._hold_points, "hold", self._hold_hand
+        return self._cycle.frames[pose.frame], pose.frame, self._hand_track[pose.frame]
+
+    def _move_held(self, pose: VisitPose, hand_world: np.ndarray, stage: bool, viewer: bool) -> None:
+        """The carried object in the visitor's hand (its middle a few centimetres above the hand's middle)."""
+        from pxr import Gf, UsdGeom
+
+        name = pose.held if pose.state != "idle" else None
+        if stage and name != self._shown_held:
+            for other, (path, *_rest) in self._held.items():
+                prim = UsdGeom.Imageable(self._stage.GetPrimAtPath(path))
+                prim.MakeVisible() if other == name else prim.MakeInvisible()
+            self._shown_held = name
+        c, s = math.cos(pose.yaw), math.sin(pose.yaw)
+        for other, (path, offset, points, indices) in self._held.items():
+            centre = hand_world + np.array([0.0, 0.0, 0.04]) if other == name else np.array([0.0, 0.0, HIDDEN_Z])
+            if stage and other == name:
+                turned = np.array([c * offset[0] - s * offset[1], s * offset[0] + c * offset[1], offset[2]])
+                ops = UsdGeom.Xformable(self._stage.GetPrimAtPath(path)).GetOrderedXformOps()
+                ops[0].Set(Gf.Vec3d(*(centre - turned).tolist()))
+                ops[1].Set(math.degrees(pose.yaw))
+            if viewer and self._newton is not None:
+                world = np.empty_like(points)
+                world[:, 0] = centre[0] + c * points[:, 0] - s * points[:, 1]
+                world[:, 1] = centre[1] + s * points[:, 0] + c * points[:, 1]
+                world[:, 2] = centre[2] + points[:, 2]
+                self._log(f"/gitex/held_{other}", world, indices, HELD_COLOURS[other], 0.5, dynamic=True)
+
     # --- the Newton viewer ---
 
     def _log(self, name: str, points: np.ndarray, indices: np.ndarray, colour, roughness=0.7, uvs=None,
@@ -408,9 +500,44 @@ class GitexHall:
                 world[:, 0] = x + c * points[:, 0] - s * points[:, 1]
                 world[:, 1] = y + s * points[:, 0] + c * points[:, 1]
                 world[:, 2] = points[:, 2]
+        self._step_stall_visitor(stage, viewer)
         if viewer and self._newton is not None and self._visitors:
             for number, (colour, vertex_ids, local) in enumerate(self._colour_groups):
                 self._log(f"/gitex/visitors_{number}", self._all_points[vertex_ids], local, colour, 0.8, dynamic=True)
+
+    def _step_stall_visitor(self, stage: bool, viewer: bool) -> None:
+        from pxr import Gf, UsdGeom, Vt
+
+        pose = self._visit_pose = self._visit.update(self._time)
+        n, path = len(self._visitors), self._stall_path
+        points_each = len(self._cycle.frames[0])
+        world = self._all_points[n * points_each:(n + 1) * points_each]
+        if pose.state == "idle":
+            if stage and self._last_frames.get(n) != "gone":
+                UsdGeom.Imageable(self._stage.GetPrimAtPath(path)).MakeInvisible()
+                self._last_frames[n] = "gone"
+            world[:, 2] = HIDDEN_Z
+            self._move_held(pose, np.zeros(3), stage, viewer)
+            return
+        points, key, hand = self._stall_visitor_points(pose)
+        c, s = math.cos(pose.yaw), math.sin(pose.yaw)
+        if stage:
+            prim = self._stage.GetPrimAtPath(path)
+            if self._last_frames.get(n) == "gone":
+                UsdGeom.Imageable(prim).MakeVisible()
+            ops = UsdGeom.Xformable(prim).GetOrderedXformOps()
+            ops[0].Set(Gf.Vec3d(pose.x, pose.y, 0.0))
+            ops[1].Set(math.degrees(pose.yaw))
+            if self._last_frames.get(n) != key:
+                UsdGeom.Mesh(self._stage.GetPrimAtPath(f"{path}/model/body")).GetPointsAttr().Set(
+                    Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(points, dtype=np.float32)))
+                self._last_frames[n] = key
+        if viewer:
+            world[:, 0] = pose.x + c * points[:, 0] - s * points[:, 1]
+            world[:, 1] = pose.y + s * points[:, 0] + c * points[:, 1]
+            world[:, 2] = points[:, 2]
+        hand_world = np.array([pose.x + c * hand[0] - s * hand[1], pose.y + s * hand[0] + c * hand[1], hand[2]])
+        self._move_held(pose, hand_world, stage, viewer)
 
     def _enable_texture(self, name: str) -> None:
         """Newton's log_mesh loads a mesh's texture but never turns on texturing (the material's 4th value), so

@@ -173,6 +173,7 @@ def main() -> None:
 
         step_dt = base_env.step_dt
         sim_time = 0.0
+        visit_state, visit_state_time = "", 0.0
         obs = env.get_observations()
         report_wall, report_sim = time.monotonic(), 0.0
         timings: dict[str, float] = collections.defaultdict(float)
@@ -229,9 +230,19 @@ def main() -> None:
                     robot_xy = tuple(robot.data.root_pos_w.torch[0, :2].tolist())
                     print(f"[walk_scene] Showing: {surroundings.show(name, robot_xy, yaw)}", flush=True)
                 if hall is not None:  # after the show requests, so the viewer gets what is on the stand now
+                    for request in bridge.visit_requests():
+                        if request == "leave":
+                            hall.end_visit()
+                        elif not hall.request_visit(request):
+                            print(f"[walk_scene] Visit not started ({request!r}): {hall.visit_state()}", flush=True)
                     mark = time.monotonic()
                     hall.step(step_dt, shown_changed=bool(requests), stage=render_next, viewer=viewer_now)
                     timings["hall (visitors)"] += time.monotonic() - mark
+                    if (state := hall.visit_state()) != visit_state or sim_time - visit_state_time >= 1.0:
+                        if state != visit_state:
+                            print(f"[walk_scene] Stall visitor: {state}", flush=True)
+                        bridge.publish_visit_state(state)  # also once a second, for listeners that join late
+                        visit_state, visit_state_time = state, sim_time
                 if sim_time - last_image_time >= camera.cfg.update_period:
                     mark = time.monotonic()
                     bridge.publish_image(sim_time, camera.data.output["rgb"].torch[0, ..., :3].cpu().numpy())
