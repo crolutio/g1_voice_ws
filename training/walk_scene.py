@@ -45,6 +45,9 @@ NEWTON_VIEWS = {
     "robot": ((3.0, -3.0, 1.6), (0.0, 0.0, 0.7)),
     "hall": ((30.0, -24.0, 22.0), (7.0, 0.0, 0.0)),
     "booth": ((5.2, -3.0, 2.4), (-0.4, 0.0, 1.0)),
+    # from the side, inside the stall: the robot (at 0, 0) and the visitor talking to it (at 1.5, 0.27) side by side,
+    # close up, where people walking along the aisle do not pass in front of the camera
+    "stall": ((0.75, -2.6, 1.5), (0.75, 0.15, 0.85)),
 }
 
 
@@ -94,8 +97,9 @@ def main() -> None:
     parser.add_argument("--gitex", action="store_true",
                         help="the GITEX exhibition hall (gitex_hall.py): booths, products, visitors walking, the head "
                              "camera on ROS; everything also drawn in the Newton viewer, seen whole from above")
-    parser.add_argument("--view", choices=["hall", "booth"], default="hall",
-                        help="with --gitex: the Newton viewer camera, on the whole hall or on the robot's stall")
+    parser.add_argument("--view", choices=["hall", "booth", "stall"], default="hall",
+                        help="with --gitex: the Newton viewer camera: the whole hall, the robot's stall, or close "
+                             "on the robot and its visitor")
     parser.add_argument("--visitors", type=int, default=10, help="with --gitex: how many visitors walk the hall")
     parser.add_argument("--people", type=int, default=2, help="with --surroundings: how many people walk past")
     parser.add_argument("--no-follow", action="store_true", help="do not move the camera with the robot")
@@ -113,6 +117,10 @@ def main() -> None:
         from surroundings import CAMERA_PERIOD_S, configure_head_camera
 
         configure_head_camera(env_cfg)
+    if own_args.gitex:
+        from people_sensor import configure_people_bodies
+
+        configure_people_bodies(env_cfg, own_args.visitors + 1)  # every visitor is solid, the stall visitor too
         # Isaac Sim's renderer only renders as often as the head camera needs (5 Hz, not at every 50 Hz control
         # step): rendering every step kept the GPU so busy it overheated and slowed to a crawl. The Newton viewer
         # is still updated every control step (below).
@@ -161,6 +169,10 @@ def main() -> None:
             surroundings = Surroundings(base_env.sim.stage, (origin[0], origin[1]), people=0, room=False)
             camera = base_env.scene.sensors["head_camera"]
             last_image_time = -1.0
+            from people_sensor import PeopleBodies, robot_frame
+
+            bodies = PeopleBodies(base_env.scene, own_args.visitors + 1)
+            people_time = -1.0
             print(f"[walk_scene] GITEX hall ready ({own_args.visitors} visitors; Newton viewer: "
                   f"{'yes' if newton is not None else 'no'}).", flush=True)
         elif own_args.surroundings:
@@ -180,9 +192,27 @@ def main() -> None:
         step_count = 0
         steps_per_render = max(1, env_cfg.sim.render_interval // env_cfg.decimation)
         print("[walk_scene] Walking. Listening on /cmd_vel and /robot/joint_command.", flush=True)
+        def reset_robot() -> None:
+            """Start the robot again from its place at the stall, standing (a new round of the stall demo)."""
+            with torch.inference_mode():  # the walking policy's tensors were made in inference mode
+                base_env.reset(env_ids=env_ids)  # the walking policy's own state, too
+                pose = robot.data.default_root_pose.torch[0:1].clone()
+                pose[:, :3] += base_env.scene.env_origins[0:1]
+                robot.write_root_pose_to_sim_index(root_pose=pose, env_ids=env_ids)
+                robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros((1, 6), device=base_env.device),
+                                                       env_ids=env_ids)
+                joints = robot.data.default_joint_pos.torch[0:1].clone()
+                robot.write_joint_position_to_sim_index(position=joints, env_ids=env_ids)
+                robot.write_joint_velocity_to_sim_index(velocity=torch.zeros_like(joints), env_ids=env_ids)
+            print("[walk_scene] Robot back at its place at the stall.", flush=True)
+
         while True:
             started = time.monotonic()
             bridge.spin_once()
+            if bridge.reset_requested():
+                reset_robot()
+                heading_hold = HeadingHold()
+                obs = env.get_observations()
             forward, left, turn = bridge.velocity_command()
             yaw = float(heading_from_quat_xyzw(robot.data.root_quat_w.torch[0:1])[0])
             turn = heading_hold.turn_command((forward, left, turn), yaw)
@@ -237,6 +267,12 @@ def main() -> None:
                             print(f"[walk_scene] Visit not started ({request!r}): {hall.visit_state()}", flush=True)
                     mark = time.monotonic()
                     hall.step(step_dt, shown_changed=bool(requests), stage=render_next, viewer=viewer_now)
+                    people = hall.people_xy()
+                    bodies.update(people)  # solid, where they are drawn
+                    if sim_time - people_time >= 0.1:  # the range sensor, 10 times a second
+                        robot_xy = tuple(robot.data.root_pos_w.torch[0, :2].tolist())
+                        bridge.publish_people(robot_frame(people, robot_xy, yaw))
+                        people_time = sim_time
                     timings["hall (visitors)"] += time.monotonic() - mark
                     if (state := hall.visit_state()) != visit_state or sim_time - visit_state_time >= 1.0:
                         if state != visit_state:

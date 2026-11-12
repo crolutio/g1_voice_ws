@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import threading
 import time
 from collections.abc import Sequence
@@ -45,6 +47,10 @@ class WalkRosBridge:
         # GITEX hall: "apple", "banana", ... sends a visitor to the robot's stall holding it; "leave" sends them away
         self._node.create_subscription(String, "/gitex/visit", self._on_visit, 10)
         self._visit_state_pub = self._node.create_publisher(String, "/gitex/visit_state", 10)
+        # the people around the robot in its own frame, as a range sensor reports them (JSON list of [x, y])
+        self._people_pub = self._node.create_publisher(String, "/robot/nearby_people", 10)
+        self._resets = 0
+        self._node.create_subscription(String, "/scene/reset_robot", self._on_reset, 10)
         self._executor = rclpy.executors.SingleThreadedExecutor()
         self._executor.add_node(self._node)
 
@@ -66,6 +72,17 @@ class WalkRosBridge:
     def _on_visit(self, msg: String) -> None:
         with self._lock:
             self._visit_requests.append(msg.data.strip().lower())
+
+    def _on_reset(self, _msg: String) -> None:
+        self._resets += 1
+
+    def reset_requested(self) -> bool:
+        """Whether a new round asked for the robot to start again from its place at the stall."""
+        requested, self._resets = self._resets > 0, 0
+        return requested
+
+    def publish_people(self, people: list[tuple[float, float]]) -> None:
+        self._people_pub.publish(String(data=json.dumps([[round(x, 3), round(y, 3)] for x, y in people])))
 
     def visit_requests(self) -> list[str]:
         """Stall visits asked for on /gitex/visit since the last call."""

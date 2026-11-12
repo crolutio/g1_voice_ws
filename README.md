@@ -15,18 +15,19 @@ Conversation, gestures and walking all work together in one mode, started from *
 1. [How it works](#1-how-it-works)
 2. [Requirements](#2-requirements)
 3. [Quick start: two terminals](#3-quick-start-two-terminals)
-4. [Running it step by step](#4-running-it-step-by-step)
-5. [Talking to the robot](#5-talking-to-the-robot)
-6. [Gestures and walking](#6-gestures-and-walking)
-7. [Using it without a microphone](#7-using-it-without-a-microphone)
-8. [Checking that everything works](#8-checking-that-everything-works)
-9. [Stopping everything](#9-stopping-everything)
-10. [Configuration](#10-configuration)
-11. [Training the walking policy](#11-training-the-walking-policy)
-12. [Troubleshooting](#12-troubleshooting)
-13. [Development](#13-development)
-14. [Project layout](#14-project-layout)
-15. [Limitations and privacy](#15-limitations-and-privacy)
+4. [The GITEX stall demo](#4-the-gitex-stall-demo)
+5. [Running it step by step](#5-running-it-step-by-step)
+6. [Talking to the robot](#6-talking-to-the-robot)
+7. [Gestures and walking](#7-gestures-and-walking)
+8. [Using it without a microphone](#8-using-it-without-a-microphone)
+9. [Checking that everything works](#9-checking-that-everything-works)
+10. [Stopping everything](#10-stopping-everything)
+11. [Configuration](#11-configuration)
+12. [Training the walking policy](#12-training-the-walking-policy)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Development](#14-development)
+15. [Project layout](#15-project-layout)
+16. [Limitations and privacy](#16-limitations-and-privacy)
 
 ## 1. How it works
 
@@ -92,7 +93,7 @@ This workspace was set up and tested with:
 | Isaac Sim          | 6.2.0, pip install in `~/isaacsim-env`                                                                                  |
 | Isaac Lab          | 3.0.0 in `~/IsaacLab`, installed into `~/isaacsim-env` (runs the walking policy)                                        |
 | Robot model        | `~/g1_voice_ws/robots/r1/`: Unitree's R1 URDF and meshes, converted to USD in `usd/`                                    |
-| Walking policy     | `~/g1_voice_ws/training/logs/rsl_rl/r1_walk_flat/` (see [Training the walking policy](#11-training-the-walking-policy)) |
+| Walking policy     | `~/g1_voice_ws/training/logs/rsl_rl/r1_walk_flat/` (see [Training the walking policy](#12-training-the-walking-policy)) |
 | Ollama             | `~/.local/ollama`, with the fallback model `llama3.1:8b`                                                                |
 | Groq               | An API key in the `GROQ_API_KEY` environment variable (optional)                                                        |
 | Python environment | `~/g1_voice_ws/.venv` (faster-whisper, qwen-tts, nvidia-riva-client, sentence-transformers, PyTorch, colcon)                                |
@@ -209,7 +210,136 @@ Now talk to it, mixing conversation and movement freely:
 
 To stop, press `Ctrl+C` in each terminal.
 
-## 4. Running it step by step
+## 4. The GITEX stall demo
+
+The robot stands at its own booth in a GITEX exhibition hall, with visitors walking past. One visitor after another comes up to the stall holding something (an apple, a banana, a mug, a bottle or scissors, chosen at random) and holds it out. The robot sees them with its head camera, says **"Hello, may I help you?"** and waves, and from then on listens to you through the microphone without the wake word. When you say goodbye, the visitor leaves, the robot goes back to its place, and the next visitor comes with a different object.
+
+### Run it
+
+From a terminal where `GROQ_API_KEY` is set (see [Groq API key](#groq-api-key)):
+
+```bash
+cd ~/g1_voice_ws && bash start_stall_demo.sh
+```
+
+It starts three things and stops all of them when you press `Ctrl+C`:
+
+| What | Log |
+|---|---|
+| The GITEX hall in Isaac Sim, with the **Newton Viewer** window looking at the robot and its visitor from the side of the stall | `log/stall_demo_scene.log` |
+| The voice assistant with the microphone, using `config/stall_demo.yaml` on top of the normal settings (no local llama model beside the simulation, a separate memory file, vision at 1.5 frames a second) | `log/stall_demo_assistant.log` |
+| The visitor rounds (`training/live_stall.py`), which print each new visitor in this terminal | the terminal |
+
+The first start takes about two minutes. The simulation runs at about a fifth of real time on this laptop, so a visitor takes about 30 seconds to walk up: **wait for the greeting before you speak.**
+
+### What to say
+
+After "Hello, may I help you?", just talk; no wake word is needed until you say goodbye.
+
+- "Can you tell me what is in my hand?" (YOLO and CLIP name the object the visitor holds)
+- "What can you see around you?"
+- "Can you wave at me?", "Can you bow?", "Celebrate!"
+- "Come here.", "Step back a little.", "Turn left.", "Turn around.", "Keep walking.", "Stop."
+- "What does Aideology do?" or any other question
+- "Thank you, goodbye!" (the visitor leaves and the next one comes)
+
+Plain commands such as "Turn left" or "Can you wave at me?" are done at once without the language model; questions go to Groq.
+
+### Safety: how the robot keeps its distance
+
+The scene reports where the people around the robot are on `/robot/nearby_people` (as a range sensor around a real robot would), and every visitor has a solid, invisible body in the physics, so the robot could never walk through a person. The robot's own rules (`robot_voice_assistant/safety.py`):
+
+| Rule | What happens |
+|---|---|
+| Never walks closer than **1 m** to anyone (centre to centre) | "Come here", "Walk forward" and "Keep walking" stop at the 1 m line; the robot says "I'll stop here, to keep a safe distance from you." |
+| Turns on the spot only with nobody within **0.6 m** | Otherwise it does not turn and says why. While turning it holds its place (the walk used to drift up to 0.3 m) |
+| Holds an arm out (wave, point, open arms, celebrate, bow) only with **0.8 m** clear | Otherwise it nods instead |
+| "Stop" | Stops at once, before any answer is thought up |
+
+In the checks, the closest anyone came to the robot while it moved was 1.05 m.
+
+### Running the pieces in separate terminals
+
+Useful to watch each log, or to send visitors yourself:
+
+```bash
+cd ~/g1_voice_ws && bash start_isaac.sh --gitex --view stall
+```
+
+```bash
+cd ~/g1_voice_ws && bash start_assistant.sh use_microphone:=true overrides:=$HOME/g1_voice_ws/src/robot_voice_assistant/config/stall_demo.yaml
+```
+
+```bash
+cd ~/g1_voice_ws && source /opt/ros/jazzy/setup.bash && source .venv/bin/activate && python3 training/live_stall.py
+```
+
+Instead of the rounds, you can send a visitor by hand (`apple`, `banana`, `mug`, `bottle` or `scissors`) and send them away:
+
+```bash
+source /opt/ros/jazzy/setup.bash && ros2 topic pub --once /gitex/visit std_msgs/msg/String "{data: mug}"
+```
+
+```bash
+source /opt/ros/jazzy/setup.bash && ros2 topic pub --once /gitex/visit std_msgs/msg/String "{data: leave}"
+```
+
+Other camera views: `--view booth` (the whole stall from the aisle) and `--view hall` (the whole hall from above).
+
+### Testing it yourself
+
+**Without a microphone.** Start the assistant with `use_microphone:=false` and type what the visitor says (the greeting still comes on its own):
+
+```bash
+cd ~/g1_voice_ws && bash start_assistant.sh use_microphone:=false overrides:=$HOME/g1_voice_ws/src/robot_voice_assistant/config/stall_demo.yaml
+```
+
+```bash
+source /opt/ros/jazzy/setup.bash && ros2 topic pub --once /voice/transcript std_msgs/msg/String "{data: 'Can you tell me what is in my hand?'}"
+```
+
+**What the robot sees, what it is told and what it used**, in other terminals:
+
+```bash
+source /opt/ros/jazzy/setup.bash && ros2 topic echo /vision/scene
+```
+
+```bash
+source /opt/ros/jazzy/setup.bash && ros2 topic echo /robot/nearby_people
+```
+
+```bash
+source /opt/ros/jazzy/setup.bash && ros2 topic echo /voice/usage
+```
+
+`/vision/scene` is the line the language model gets ("a person right in front of you, close, holding a mug; 2 people"), `/robot/nearby_people` the people around the robot in metres (forward, left), and `/voice/usage` the tokens and timing of every answer and what is left of Groq's limits.
+
+**The object test**: visitors bring each object in turn, ask "Can you tell me what is in my hand?" and score the answers. With the scene (`--headless` keeps the GPU cooler) and the assistant (`use_microphone:=false`) running:
+
+```bash
+cd ~/g1_voice_ws && source /opt/ros/jazzy/setup.bash && source .venv/bin/activate && python3 training/stall_demo.py --rounds 2
+```
+
+The report, with the camera image of every visit, is written to `log/stall_demo/<date_time>/report.md`. `--objects mug bottle` tests only some objects; `--first-round 2 --out-dir <folder>` adds a later session to the same report.
+
+**The whole conversation test**: a visitor walks up and has a 16-turn conversation (name, what is in their hand, what the robot sees, gestures, every walking motion, a knowledge question, goodbye). Every turn is checked on what really happened, motions on the robot's odometry, and the tokens and timings are recorded:
+
+```bash
+cd ~/g1_voice_ws && source /opt/ros/jazzy/setup.bash && source .venv/bin/activate && python3 training/visitor_conversation.py
+```
+
+The report is in `log/visitor_conversation/<date_time>/report.md` (and `conversation.json`).
+
+### If something goes wrong
+
+| Problem | What to do |
+|---|---|
+| `GROQ_API_KEY is not set` | Run it from a normal terminal: `~/.bashrc` sets the key only for interactive shells |
+| The simulation slows to a crawl after a few minutes | The laptop GPU is too hot (about 88 °C) and has slowed down. Stop with `Ctrl+C`, let it cool below about 70 °C (`nvidia-smi`), and start again |
+| "I can't make out what you are holding" | The visitor is still walking up, or the object is turned away; ask again when they stand at the stall |
+| Answers become slow | Groq allows 8,000 tokens a minute; when the robot is asked many questions quickly it waits a few seconds for Groq |
+
+## 5. Running it step by step
 
 The two start scripts run the commands below.
 
@@ -272,7 +402,7 @@ Launch arguments (they also work with `start_assistant.sh`):
 | `use_sim_time:=false`        | `true`         | Time gestures and motions with the wall clock instead of `/clock`     |
 | `config:=/path/to/file.yaml` | package config | Use a different settings file                                         |
 
-## 5. Talking to the robot
+## 6. Talking to the robot
 
 1. Make sure both terminals are running (see [Quick start](#3-quick-start-two-terminals)).
 2. Speak clearly, about an arm's length from the laptop microphone.
@@ -311,7 +441,7 @@ The robot uses a general-purpose language model, so you can ask about almost any
 
 Answers are kept to at most four sentences, because they are spoken. Ask "tell me more" for details.
 
-## 6. Gestures and walking
+## 7. Gestures and walking
 
 The language model picks a gesture with every reply, and a walking motion when you ask the robot to move. Both can happen at the same time, for example waving while walking towards you.
 
@@ -351,7 +481,7 @@ The simulation does not stop an arm from passing through the robot's own head or
 
 ### How well it walks
 
-The robot walks with bent knees: they are bent about 25 degrees when standing and swing between about 21 and 52 degrees with every step at 1 m/s, on both legs. (The first policy locked both knees straight against their -10 degree stop and shuffled with its hips and ankles; see [Training the walking policy](#11-training-the-walking-policy).)
+The robot walks with bent knees: they are bent about 25 degrees when standing and swing between about 21 and 52 degrees with every step at 1 m/s, on both legs. (The first policy locked both knees straight against their -10 degree stop and shuffled with its hips and ankles; see [Training the walking policy](#12-training-the-walking-policy).)
 
 Measured with the final policy (`2026-10-28_15-31-18/model_2248.pt`) in terminal 1's scene, headless at 100% of real time. The robot did not fall in any test: the pelvis always stayed between 0.69 and 0.77 m (0.73 m when standing).
 
@@ -398,7 +528,7 @@ Or drive it with a speed (forward m/s and turning rad/s), repeated 20 times per 
 ros2 topic pub -r 20 /cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.5}, angular: {z: 0.0}}"
 ```
 
-## 7. Using it without a microphone
+## 8. Using it without a microphone
 
 ### Chat with the robot's brain by typing
 
@@ -451,7 +581,7 @@ Make the robot say something:
 ros2 topic pub --once /voice/reply std_msgs/msg/String "{data: 'Hello, I am R1.'}"
 ```
 
-## 8. Checking that everything works
+## 9. Checking that everything works
 
 Run these in a third terminal, after `source /opt/ros/jazzy/setup.bash`.
 
@@ -491,7 +621,7 @@ The local fallback model is loaded:
 ~/.local/ollama/bin/ollama ps
 ```
 
-## 9. Stopping everything
+## 10. Stopping everything
 
 1. Press `Ctrl+C` in terminal 2. This stops the five nodes and releases the microphone.
 2. Press `Ctrl+C` in terminal 1, or close the viewer window.
@@ -507,7 +637,7 @@ To make sure nothing is left running (no output means everything is stopped):
 pgrep -af "robot_voice_assistant|walk_scene|arecord|ollama"
 ```
 
-## 10. Configuration
+## 11. Configuration
 
 All assistant settings are in `src/robot_voice_assistant/config/voice_assistant.yaml`. Changes take effect the next time you start the assistant.
 
@@ -642,7 +772,7 @@ Typical times, measured from the moment you stop speaking until the robot's voic
 
 The gestures are defined in `robot_voice_assistant/gestures.py` and the motions in `robot_voice_assistant/motions.py`.
 
-## 11. Training the walking policy
+## 12. Training the walking policy
 
 The walking policy was trained with Isaac Lab 3.0 on the task `R1-Walk-Flat`, defined in `~/g1_voice_ws/training/walk_task/`:
 
@@ -694,7 +824,7 @@ To rebuild the robot model from Unitree's URDF (only needed if the URDF changes)
 source ~/isaacsim-env/bin/activate && cd ~/IsaacLab && python scripts/tools/convert_urdf.py ~/g1_voice_ws/robots/r1/R1.urdf ~/g1_voice_ws/robots/r1/usd/r1.usd --merge_joints --viz none
 ```
 
-## 12. Troubleshooting
+## 13. Troubleshooting
 
 | Problem                                      | Fix                                                                                                                                                                            |
 | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -711,13 +841,13 @@ source ~/isaacsim-env/bin/activate && cd ~/IsaacLab && python scripts/tools/conv
 | An answer is wrong or outdated               | Add the correct fact to `config/knowledge/`.                                                                                                                                   |
 | `Microphone stream ended`                    | `arecord` cannot open the device. Run `arecord -l` and set `mic_device`.                                                                                                       |
 | The full Isaac Sim window is extremely slow  | Use the default light viewer (`--viewer newton_gl`); the full window runs at about 4% of real time on this laptop.                                                             |
-| `No checkpoint found` in terminal 1          | Train the walking policy first (see [Training the walking policy](#11-training-the-walking-policy)).                                                                           |
+| `No checkpoint found` in terminal 1          | Train the walking policy first (see [Training the walking policy](#12-training-the-walking-policy)).                                                                           |
 | `ros2: command not found`                    | Run `source /opt/ros/jazzy/setup.bash` first.                                                                                                                                  |
-| `Package 'robot_voice_assistant' not found`  | Build the workspace (see [Development](#13-development)) and `source ~/g1_voice_ws/install/setup.bash`.                                                                        |
+| `Package 'robot_voice_assistant' not found`  | Build the workspace (see [Development](#14-development)) and `source ~/g1_voice_ws/install/setup.bash`.                                                                        |
 
 Logs: Isaac Sim and Isaac Lab in `~/isaacsim-env/lib/python3.12/site-packages/isaacsim/kit/logs/Kit/`, the ROS 2 nodes in `~/.ros/log/`, Ollama (when started by the script) in `~/g1_voice_ws/log/ollama.log`.
 
-## 13. Development
+## 14. Development
 
 ### Build the workspace
 
@@ -733,6 +863,12 @@ The tests cover speech detection, the wake word check, the language model backen
 
 ```bash
 cd ~/g1_voice_ws/src/robot_voice_assistant && env -i HOME=$HOME PATH=/usr/bin:/bin ../../.venv/bin/python -m pytest test
+```
+
+They also cover what the camera sees (`test_scene_context.py`: held objects, the closer look, CLIP naming, the greeting) and keeping a safe distance from people (`test_safety.py`). The scene's own tests (the GITEX hall, the stall visitor, the people sensor, the visitor rounds and the scoring of the stall and conversation tests) run from `training/`:
+
+```bash
+cd ~/g1_voice_ws/training && ../.venv/bin/python -m pytest -q tests
 ```
 
 ### Check speech recognition
@@ -793,13 +929,14 @@ ros2 run robot_voice_assistant chat --no-memory --questions ~/g1_voice_ws/src/ro
 cd ~/g1_voice_ws/src/robot_voice_assistant && ../../.venv/bin/python scripts/build_collision_model.py ~/g1_voice_ws/robots/r1/R1.urdf ~/g1_voice_ws/robots/r1
 ```
 
-## 14. Project layout
+## 15. Project layout
 
 ```text
 ~/g1_voice_ws/
 ├── README.md                      this file
 ├── start_isaac.sh                 terminal 1: the R1 in the simulator
 ├── start_assistant.sh             terminal 2: conversation, gestures and walking
+├── start_stall_demo.sh            the GITEX stall demo: scene, assistant with the microphone, visitor rounds
 ├── .venv/                         Python environment for the assistant
 ├── models/                        Whisper, Qwen3-TTS, Qwen3-Embedding and Piper models
 ├── robots/r1/                     Unitree R1 URDF, meshes and the converted USD
@@ -809,12 +946,19 @@ cd ~/g1_voice_ws/src/robot_voice_assistant && ../../.venv/bin/python scripts/bui
 │   ├── play_walk.sh               shows 32 robots walking
 │   ├── walk_scene.py              terminal 1's scene: runs the policy, connects to ROS 2
 │   ├── walk_ros_bridge.py         ROS 2 topics of the scene
+│   ├── gitex_hall.py              the GITEX hall, its walking visitors and the stall visitor
+│   ├── stall_visit.py             a visitor who walks up holding something out
+│   ├── people_sensor.py           people around the robot (/robot/nearby_people) and their physics bodies
+│   ├── live_stall.py              the stall demo's visitor rounds
+│   ├── stall_demo.py              the object test ("what is in my hand?")
+│   ├── visitor_conversation.py    the whole-conversation test
 │   └── logs/                      training runs and checkpoints
 └── src/robot_voice_assistant/     the ROS 2 package
     ├── config/voice_assistant.yaml          all settings
+    ├── config/stall_demo.yaml               the stall demo's settings on top of them
     ├── config/knowledge/                    documents the robot can search
     ├── config/robot_collision_model.npz     R1 arm, head and torso shapes for the gesture tests
-    ├── launch/voice_assistant.launch.py     starts the five nodes
+    ├── launch/voice_assistant.launch.py     starts the nodes
     ├── scripts/build_collision_model.py     rebuilds the collision model
     ├── robot_voice_assistant/
     │   ├── stt_node.py, brain_node.py, tts_node.py, gesture_node.py, motion_node.py   the ROS 2 nodes
@@ -827,6 +971,9 @@ cd ~/g1_voice_ws/src/robot_voice_assistant && ../../.venv/bin/python scripts/bui
     │   ├── speech_pipeline.py     Qwen3-TTS and Piper, sentence-by-sentence speaking
     │   ├── gestures.py            R1 gestures and joint limits
     │   ├── motions.py             walking motions on odometry
+    │   ├── safety.py              keeping a safe distance from people
+    │   ├── vision_node.py, scene_context.py, object_namer.py   what the head camera sees (YOLO, CLIP)
+    │   ├── token_usage.py         tokens per answer and Groq's limits
     │   ├── kinematics.py          R1 arm kinematics for the clearance checks
     │   ├── vad.py, wake_word.py, transcript_filter.py   listening
     │   ├── arithmetic.py          calculator
@@ -834,7 +981,7 @@ cd ~/g1_voice_ws/src/robot_voice_assistant && ../../.venv/bin/python scripts/bui
     └── test/                      unit tests and conversation question sets
 ```
 
-## 15. Limitations and privacy
+## 16. Limitations and privacy
 
 ### Limitations
 

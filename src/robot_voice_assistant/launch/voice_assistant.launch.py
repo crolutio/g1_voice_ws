@@ -19,6 +19,7 @@ LOG_FORMAT = "[{severity}] [{date_time_with_ms}] [{name}]: {message}"
 def generate_launch_description() -> LaunchDescription:
     default_config = os.path.join(get_package_share_directory(PACKAGE), "config", "voice_assistant.yaml")
     config = LaunchConfiguration("config")
+    overrides = LaunchConfiguration("overrides")  # a second file whose values win, e.g. config/stall_demo.yaml
     use_microphone = LaunchConfiguration("use_microphone")
 
     # Whisper, Qwen3-TTS and Qwen3-Embedding are loaded from the workspace's model folder.
@@ -26,7 +27,7 @@ def generate_launch_description() -> LaunchDescription:
 
     def node(executable: str, **kwargs: object) -> Node:
         return Node(package=PACKAGE, executable=executable, name=executable, output="screen",
-                    parameters=[config], additional_env=model_env, **kwargs)
+                    parameters=[config, overrides], additional_env=model_env, **kwargs)
 
     return LaunchDescription(
         [
@@ -34,6 +35,8 @@ def generate_launch_description() -> LaunchDescription:
                 "RCUTILS_CONSOLE_OUTPUT_FORMAT", os.environ.get("RCUTILS_CONSOLE_OUTPUT_FORMAT", LOG_FORMAT)
             ),
             DeclareLaunchArgument("config", default_value=default_config),
+            DeclareLaunchArgument("overrides", default_value=default_config,
+                                  description="a parameter file applied after config (default: config again)"),
             DeclareLaunchArgument("use_microphone", default_value="true",
                                   description="false = type messages on /voice/transcript instead of speaking"),
             DeclareLaunchArgument("use_vision", default_value="true",
@@ -43,10 +46,10 @@ def generate_launch_description() -> LaunchDescription:
             node("stt_node", condition=IfCondition(use_microphone)),
             node("brain_node"),
             Node(package=PACKAGE, executable="motion_node", name="motion_node", output="screen",
-                 parameters=[config, {"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)}]),
+                 parameters=[config, overrides, {"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)}]),
             node("tts_node"),
             node("vision_node", condition=IfCondition(LaunchConfiguration("use_vision"))),
             Node(package=PACKAGE, executable="gesture_node", name="gesture_node", output="screen",
-                 parameters=[config, {"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)}]),
+                 parameters=[config, overrides, {"use_sim_time": ParameterValue(LaunchConfiguration("use_sim_time"), value_type=bool)}]),
         ]
     )

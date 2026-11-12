@@ -366,7 +366,7 @@ class GitexHall:
         self._visit = StallVisit(entry=(ox + 4.6, oy - 5.0), stop=(ox + 1.5, oy + 0.27), exit=(ox + 4.6, oy + 5.0),
                                  robot=(ox, oy), speed=self._cycle.walk_speed, cycle_m=self._cycle.cycle_m,
                                  frames=len(self._cycle.frames), standing_frame=self._cycle.standing_frame,
-                                 max_stay_s=60.0)
+                                 max_stay_s=600.0)  # a whole conversation; the tests send "leave" when done
         self._visit_pose = VisitPose("idle")
         self._held: dict[str, tuple] = {}  # name: (prim path, centre offset from its origin, Newton mesh)
         cache = UsdGeom.BBoxCache(0, [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
@@ -392,6 +392,13 @@ class GitexHall:
 
     def end_visit(self) -> None:
         self._visit.leave(self._time)
+
+    def people_xy(self) -> list[tuple[float, float] | None]:
+        """Where each visitor stands on the floor (world x, y), the stall visitor last (None while not sent)."""
+        people: list[tuple[float, float] | None] = [visitor.pose(self._time)[:2] for visitor, _, _ in self._visitors]
+        pose = self._visit_pose
+        people.append(None if pose.state == "idle" else (pose.x, pose.y))
+        return people
 
     def visit_state(self) -> str:
         """ "idle", or the visitor's state and what they carry, e.g. "at_stall apple"."""

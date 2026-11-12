@@ -1,0 +1,11 @@
+# The live stall demo (start_stall_demo.sh): settings applied on top of voice_assistant.yaml.
+brain_node:
+  ros__parameters:
+    # No local llama model beside the simulation: on the same GPU it took 8 to 60 s an answer (or timed out),
+    # while Groq asked to wait 4 to 15 s when rate-limited. Plain commands do not need a language model at all.
+    use_local_fallback: false
+    # The demo's visitors and questions are kept apart from the robot's own long-term memory.
+    memory_file: ~/.local/share/robot_voice_assistant/stall_demo_memory.jsonl
+vision_node:
+  ros__parameters:
+    rate_hz: 1.5  # half the default: the laptop GPU also renders the simulation and the viewer
