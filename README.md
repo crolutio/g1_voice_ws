@@ -34,7 +34,7 @@ Conversation, gestures and walking all work together in one mode, started from *
 There are two parts, one per terminal. They talk to each other over ROS 2 topics.
 
 - **Terminal 1, the simulator.** Isaac Sim simulates the R1 on a flat floor. A neural network policy, trained with reinforcement learning, moves the legs so the robot keeps its balance and walks at the speed it is told. The arms, waist and head follow the gesture commands.
-- **Terminal 2, the assistant.** Five ROS 2 nodes listen, think, speak, gesture and walk.
+- **Terminal 2, the assistant.** Six ROS 2 nodes listen, see, think, speak, gesture and walk.
 
 | Node           | What it does                                                                                                                    |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------- |
@@ -43,6 +43,7 @@ There are two parts, one per terminal. They talk to each other over ROS 2 topics
 | `tts_node`     | Speaks the reply. While it speaks, the microphone is muted so the robot does not hear itself.                                   |
 | `gesture_node` | Turns the gesture name into smooth arm, waist and head movements, sent to the robot 50 times per second.                        |
 | `motion_node`  | Turns a walking motion ("walk forward", "turn left") into walking speeds and stops when the robot has arrived.                  |
+| `vision_node`  | Looks through the head camera with two YOLO detectors and CLIP, and tells the brain what it sees and what a visitor holds (see [Vision](#vision-vision_node)). |
 
 ```text
  microphone --> stt_node --/voice/transcript--> brain_node --/voice/reply--> tts_node --> speakers
@@ -771,6 +772,38 @@ Typical times, measured from the moment you stop speaking until the robot's voic
 | `command_topic` | `/robot/joint_command` | Topic the simulator listens on (`gesture_node` only)  |
 
 The gestures are defined in `robot_voice_assistant/gestures.py` and the motions in `robot_voice_assistant/motions.py`.
+
+### Vision (`vision_node`)
+
+The robot sees through the head camera (640x480, tilted 15° down). Three models work together:
+
+| Model | File | What it does |
+| ----- | ---- | ------------ |
+| **YOLO11s** (Ultralytics, trained on COCO) | `models/yolo/yolo11s.pt` | Finds the 80 everyday COCO things (person, apple, banana, cup, bottle, scissors, ...). Very sure of what it knows, but knows only those 80. |
+| **YOLOv8s-World v2** (Ultralytics, open vocabulary) | `models/yolo/yolov8s-worldv2.pt` | Finds anything named in `vocabulary` (mug, phone, drill, teapot, box, ...) without training: the words are the classes. |
+| **CLIP ViT-B/32** (OpenAI, zero-shot) | `weights/clip/ViT-B-32.pt` | Compares a picture with sentences such as "a photo of a mug." and picks the closest. Used only to name what a visitor holds. |
+
+How they are combined, frame by frame:
+
+1. Both YOLO models look at the whole image and their detections are joined. COCO labels that make no sense indoors (kite, surfboard, sports ball, ...) are ignored (`ignore`).
+2. When a person stands in front of the stall, both models look again at a crop of that person's upper body, enlarged to 640 pixels (the closer look, up to 3 people at once). Small things in a hand are found much more often this way.
+3. YOLO is sometimes unsure of a thing in a hand (it calls a red apple a "sports ball" and a phone a "tennis racket"). For those unsure names only (`UNSURE_HELD_NAMES` in `scene_context.py`), CLIP looks at the thing and names it instead. A clear YOLO name such as "bottle" is kept.
+4. What the visitor holds is decided by a vote over the last 3 seconds, so one wrong frame or a frame where the visitor is missed does not change the answer. Worn things (tie, backpack, handbag) are never said to be held.
+5. The result becomes one line for the language model on `/vision/scene` ("a person right in front of you, close, holding a mug; 2 people"). A person seen in front of the stall for 3 frames in a row is greeted (`/vision/person_arrived`).
+
+| Setting           | Default                         | Meaning                                                          |
+| ----------------- | ------------------------------- | ---------------------------------------------------------------- |
+| `model`           | `models/yolo/yolov8s-worldv2.pt`| The open-vocabulary detector (YOLO-World)                        |
+| `coco_model`      | `models/yolo/yolo11s.pt`        | The COCO detector; `""` uses YOLO-World only                     |
+| `clip_model`      | `weights/clip/ViT-B-32.pt`      | CLIP for naming held things; `""` keeps YOLO's names             |
+| `vocabulary`      | 21 words (person, apple, mug, ...) | What YOLO-World looks for                                     |
+| `confidence`      | `0.25`                          | Lowest score kept from YOLO-World                                |
+| `coco_confidence` | `0.4`                           | Lowest score kept from YOLO11                                    |
+| `look_closer`     | `true`                          | Look again, enlarged, at a person who walked up                  |
+| `rate_hz`         | `3.0` (`1.5` in the stall demo) | Frames looked at per second                                      |
+| `device`          | `cuda`                          | Where the models run                                             |
+
+Turn vision off with `use_vision:=false` on the launch command. The code is in `robot_voice_assistant/vision_node.py` (the camera and the models), `scene_context.py` (joining, the closer look, the vote, the scene line) and `object_namer.py` (CLIP).
 
 ## 12. Training the walking policy
 
