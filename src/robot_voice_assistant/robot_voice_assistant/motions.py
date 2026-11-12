@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 
 NO_MOTION = "none"
@@ -29,13 +30,16 @@ class MotionSpec:
     turn_deg: float = 0.0  # positive = left
     speed: float = 0.5  # m/s for walking, rad/s for turning
     continuous: bool = False  # keep going until another motion or "stop"
+    time_limit_s: float | None = None  # give up after this long (default: from the distance and speed)
 
 
 # There are no side steps: the trained R1 walking policy does not walk sideways (measured 0.00 to 0.07 m/s
 # for 0.25 m/s commanded), so "step left" or "step right" would not move the robot.
 MOTIONS: dict[str, MotionSpec] = {
     "walk_forward": MotionSpec(forward_m=1.0, speed=0.5),
-    "walk_backward": MotionSpec(forward_m=-0.5, speed=0.3),
+    # The walking policy was not trained to walk backward: it goes back at about 0.04 m/s for 0.3 m/s commanded
+    # (visitor test, 2026-11-11), so half a metre takes 15 s or more, slowing down at the end included.
+    "walk_backward": MotionSpec(forward_m=-0.5, speed=0.3, time_limit_s=20.0),
     # Turning on the spot at 0.5 rad/s: at 0.8 rad/s the walk fell in 13 of 32 robots after a few minutes of use
     # (test_falls.py "voice robot sequence x3"); at 0.5 rad/s none fell. A 90 degree turn takes about 3 s.
     "turn_left": MotionSpec(turn_deg=90.0, speed=0.5),
@@ -65,6 +69,10 @@ ANGLE_TOLERANCE_RAD = math.radians(2.0)
 SLOWDOWN_DISTANCE_M = 0.25  # slow down over the last part of a walk
 SLOWDOWN_ANGLE_RAD = math.radians(25.0)
 MIN_SPEED_FRACTION = 0.5  # the walking policy barely responds to very small commands
+# While turning on the spot, the walking policy drifts (about 0.3 m backward over a turn-around); the controller
+# walks against it, gently, so the robot ends where it started (and keeps its distance from people around it).
+TURN_HOLD_GAIN = 3.0  # m/s per metre of drift
+TURN_HOLD_MAX_SPEED = 0.15
 TIME_LIMIT_FACTOR = 3.0  # give up after 3x the nominal duration (robot stuck or pushed)
 
 
@@ -104,7 +112,8 @@ class MotionController:
         )
         self._spec, self._start, self.name = spec, pose, name
         self._last_yaw, self._turned_rad = pose.yaw, 0.0
-        self._deadline_s = math.inf if spec.continuous else now_s + TIME_LIMIT_FACTOR * nominal_s + 2.0
+        limit_s = spec.time_limit_s if spec.time_limit_s is not None else TIME_LIMIT_FACTOR * nominal_s + 2.0
+        self._deadline_s = math.inf if spec.continuous else now_s + limit_s
 
     def update(self, pose: Pose2D, now_s: float) -> VelocityCommand:
         spec = self._spec
@@ -124,7 +133,10 @@ class MotionController:
                 self._spec, self.name = None, NO_MOTION
                 return VelocityCommand()
             scale = max(MIN_SPEED_FRACTION, min(1.0, abs(remaining) / SLOWDOWN_ANGLE_RAD))
-            return VelocityCommand(turn=math.copysign(spec.speed * scale, remaining))
+            # hold the place it turns on: walk back against any drift along its current heading
+            ahead = (self._start.x - pose.x) * math.cos(pose.yaw) + (self._start.y - pose.y) * math.sin(pose.yaw)
+            hold = max(-TURN_HOLD_MAX_SPEED, min(TURN_HOLD_MAX_SPEED, TURN_HOLD_GAIN * ahead))
+            return VelocityCommand(forward=hold, turn=math.copysign(spec.speed * scale, remaining))
 
         # Walking: target point fixed in the world, expressed in the robot's current frame.
         cos_s, sin_s = math.cos(self._start.yaw), math.sin(self._start.yaw)
@@ -154,3 +166,15 @@ MOTION_PHRASES: dict[str, list[str]] = {
     "turn_around": ["turn around", "face the other way", "turn back"],
     "walk_backward": ["walk backwards", "step back", "move back a little", "back up"],
 }
+
+
+# "Stop" must stop the robot at once, not after the language model answers (with Groq rate-limited, the local model
+# took 13 s while the robot kept walking). A command: at the start of what was said or of a clause ("Okay R1, stop").
+_STOP = re.compile(r"(?:^|[,.!?;]\s*|\b(?:please|okay|ok|now|just|hey|r1|robot)\s+)(?:stop|halt|freeze)\b"
+                   r"|\bstand still\b|\bstop (?:walking|moving)\b", re.IGNORECASE)
+_NOT_STOP = re.compile(r"\b(?:don't|dont|do not|never)\s+stop\b", re.IGNORECASE)
+
+
+def is_stop_request(text: str) -> bool:
+    """Whether the person tells the robot to stop moving."""
+    return bool(_STOP.search(text.strip())) and not _NOT_STOP.search(text)

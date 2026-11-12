@@ -318,8 +318,25 @@ def test_held_things_are_forgotten_when_the_visitor_walks_away() -> None:
     visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
     memory = HeldObjectMemory(keep_s=3.0)
     memory.update(0.0, [visitor, boxed("mug", (0.50, 0.10, 0.56, 0.18))])
-    assert memory.update(1.0, []) == []  # nobody close: nothing held
-    assert "holding" not in describe_scene(memory.update(1.5, [visitor]))  # someone new walked up
+    assert memory.update(3.5, []) == []  # nobody close for longer than keep_s: they have gone
+    assert "holding" not in describe_scene(memory.update(4.0, [visitor]))  # someone new walked up
+
+
+def test_a_frame_where_the_close_visitor_is_missed_keeps_them_and_what_they_hold() -> None:
+    from robot_voice_assistant.scene_context import HeldObjectMemory
+
+    visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    far = boxed("person", (0.85, 0.3, 0.92, 0.55))
+    memory = HeldObjectMemory(keep_s=3.0)
+    memory.update(0.0, [visitor, boxed("mug", (0.50, 0.10, 0.56, 0.18))])
+    # the detector missed the visitor for a frame (stall demo, round 2: "3 people; a chair on your left")
+    assert "close, holding a mug" in describe_scene(memory.update(0.7, [far]))
+
+
+def test_things_people_wear_are_not_said_to_be_held() -> None:
+    visitor = boxed("person", (0.30, 0.0, 0.60, 0.80))
+    for worn in ("tie", "backpack", "handbag"):
+        assert "holding" not in describe_scene([visitor, boxed(worn, (0.42, 0.2, 0.48, 0.4))]), worn
 
 
 def test_one_frame_naming_the_held_thing_wrongly_is_outvoted() -> None:
@@ -358,3 +375,11 @@ def test_a_visitor_who_stops_at_the_stall_is_greeted_after_someone_walked_past()
               [visitor], [visitor]]
     greeted = [t * 0.67 for t, seen in enumerate(frames) if greeter.update(t * 0.67, people_at_the_stall(seen))]
     assert len(greeted) == 1 and greeted[0] >= 14 * 0.67  # the passer-by crossed in two frames: only the visitor
+
+
+def test_a_visitor_already_talking_to_the_robot_is_not_greeted_again() -> None:
+    from robot_voice_assistant.scene_context import IN_CONVERSATION_S, in_conversation
+
+    assert not in_conversation(100.0, None)  # nobody has talked to the robot yet
+    assert in_conversation(100.0, 100.0 - IN_CONVERSATION_S + 1)  # the robot turned away and back mid-talk
+    assert not in_conversation(100.0, 100.0 - IN_CONVERSATION_S - 1)  # a while since anyone spoke: a new visitor

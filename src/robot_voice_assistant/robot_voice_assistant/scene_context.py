@@ -74,7 +74,8 @@ def _article(label: str) -> str:
     return "an" if label[0] in "aeiou" else "a"
 
 
-NEVER_HELD = {"person", "chair", "table", "television", "sofa", "bed", "plant", "bench", "refrigerator", "car"}
+NEVER_HELD = {"person", "chair", "table", "television", "sofa", "bed", "plant", "bench", "refrigerator", "car",
+              "tie", "backpack", "handbag"}  # the last ones are worn: YOLO finds them on a visitor's clothes
 
 
 def _name(label: str) -> str:
@@ -120,16 +121,24 @@ HELD_KEEP_S = 3.0  # what was seen held in the last this many seconds votes (abo
 class HeldObjectMemory:
     """Steadies what a close visitor is said to hold: the names seen held in the last ``keep_s`` seconds vote, and
     the most common one is said. A small object in a hand is missed in some frames and misnamed in others (a banana
-    called an apple once), and a question is answered from whichever frame is the latest. Forgotten when nobody is
-    close any more. One held thing per view: a visitor shows one thing at a time."""
+    called an apple once), and a question is answered from whichever frame is the latest. Forgotten when nobody has
+    been close for ``keep_s``; a frame in which the detector misses the close visitor keeps them, and what they hold.
+    One held thing per view: a visitor shows one thing at a time."""
 
     def __init__(self, keep_s: float = HELD_KEEP_S) -> None:
         self.keep_s = keep_s
         self._seen: list[tuple[float, Detection]] = []  # (when, the thing held), newest last
+        self._visitor: Detection | None = None  # the closest person last seen close, and when
+        self._visitor_at = 0.0
 
     def update(self, now: float, detections: list[Detection]) -> list[Detection]:
-        if not _nearby_people(detections):
-            self._seen = []
+        close = _nearby_people(detections)
+        if close:
+            self._visitor, self._visitor_at = max(close, key=lambda person: person[1].height)[1], now
+        elif self._visitor is not None and now - self._visitor_at <= self.keep_s:
+            detections = [*detections, self._visitor]  # missed for a moment: they are still standing there
+        else:
+            self._seen, self._visitor = [], None  # nobody close for a while: they have gone
             return detections
         held = [thing for things in held_objects(detections).values() for thing in things]
         self._seen = [(at, thing) for at, thing in self._seen if now - at <= self.keep_s]
@@ -274,6 +283,15 @@ def people_at_the_stall(detections: list[Detection]) -> int:
     who stops a moment later."""
     return sum(1 for d in detections if d.label == "person" and d.height >= NEARBY_HEIGHT
                and STALL_SIDES[0] <= d.x_center <= STALL_SIDES[1])
+
+
+IN_CONVERSATION_S = 30.0  # someone the robot answered this recently is still talking to it
+
+
+def in_conversation(now: float, last_answer_at: float | None, quiet_s: float = IN_CONVERSATION_S) -> bool:
+    """Whether the robot is talking with someone: then a person "walking up" is them coming back into view (the
+    robot turned or walked away and back) and is not greeted again."""
+    return last_answer_at is not None and now - last_answer_at < quiet_s
 
 
 class PersonGreeter:

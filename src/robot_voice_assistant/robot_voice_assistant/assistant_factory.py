@@ -27,6 +27,7 @@ class BrainSettings:
     use_groq: bool = True
     groq_model: str = DEFAULT_GROQ_MODEL
     fallback_model: str = "llama3.1:8b"
+    use_local_fallback: bool = True  # false: no local model on the GPU (e.g. beside the simulation); wait for Groq
     ollama_url: str = "http://localhost:11434"
     # Embeddings: knowledge base search, long-term memory and command matching.
     use_embeddings: bool = True
@@ -47,6 +48,8 @@ def create_backend(settings: BrainSettings, environment: Mapping[str, str] = os.
     api_key = environment.get("GROQ_API_KEY", "").strip()
     if settings.use_groq and api_key:
         primary = GroqClient(api_key, settings.groq_model)
+        if not settings.use_local_fallback:
+            return FallbackBackend(primary, None), f"Groq {settings.groq_model}, no local model (waits for Groq)"
         return FallbackBackend(primary, fallback), (
             f"Groq {settings.groq_model}, falling back to local {settings.fallback_model}"
         )
@@ -94,5 +97,6 @@ def create_conversation(
         retriever=retriever,
         command_matcher=matcher,
         surroundings=surroundings,
+        command_phrases={**GESTURE_PHRASES, **(MOTION_PHRASES if settings.can_walk else {})},
     )
     return conversation, notes

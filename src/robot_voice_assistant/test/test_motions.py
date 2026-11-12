@@ -117,3 +117,42 @@ def test_motion_gives_up_after_its_time_limit() -> None:
 def test_unknown_motion_is_rejected() -> None:
     with pytest.raises(KeyError):
         ideal().start("backflip", Pose2D(0.0, 0.0, 0.0), now_s=0.0)
+
+
+def test_a_stop_request_is_recognised_without_the_language_model() -> None:
+    from robot_voice_assistant.motions import is_stop_request
+
+    for said in ["Stop.", "stop walking", "Halt!", "Please stand still", "Okay R1, stop there", "freeze"]:
+        assert is_stop_request(said), said
+    # stopping by mistake only makes the robot stand; still, these do not ask it to
+    for said in ["Keep walking.", "Don't stop", "do not stop walking", "What is a bus stop?", "Turn around"]:
+        assert not is_stop_request(said), said
+
+
+def test_walking_backward_gets_time_for_the_slow_backward_walk() -> None:
+    """The walking policy was not trained to walk backward: in the visitor test it went back at about 0.04 m/s
+    for 0.3 m/s commanded, and stopped at 0.24 to 0.35 m when its time ran out."""
+    controller = ideal()
+    pose, t = Pose2D(0.0, 0.0, 0.0), 0.0
+    controller.start("walk_backward", pose, 0.0)
+    while t < 30.0 and not controller.finished:
+        command = controller.update(pose, t)
+        pose = Pose2D(pose.x + 0.04 / 0.3 * command.forward * 0.05, 0.0, 0.0)  # the robot does 0.04 of 0.3 m/s
+        t += 0.05
+    assert pose.x == pytest.approx(-0.5, abs=0.05)
+
+
+def test_a_turn_on_the_spot_holds_its_place_against_drift() -> None:
+    """The walking policy drifts about 0.3 m backward over a turn-around (visitor tests, 2026-11-11), which once
+    brought the robot within 0.9 m of a visitor: the controller now walks against the drift while it turns."""
+    controller = ideal()
+    pose, t, dt = Pose2D(0.0, 0.0, 0.0), 0.0, 0.05
+    controller.start("turn_around", pose, 0.0)
+    while t < 30.0 and not controller.finished:
+        command = controller.update(pose, t)
+        forward = command.forward - 0.1  # the policy slips back 0.1 m/s while turning
+        pose = Pose2D(pose.x + forward * math.cos(pose.yaw) * dt, pose.y + forward * math.sin(pose.yaw) * dt,
+                      pose.yaw + command.turn * dt)
+        t += dt
+    assert controller.finished
+    assert math.hypot(pose.x, pose.y) < 0.1  # without holding its place it would be about 0.6 m away

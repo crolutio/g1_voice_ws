@@ -6,9 +6,11 @@ back to a local Ollama model. Qwen3-Embedding finds relevant knowledge and memor
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
+from dataclasses import asdict
 
 from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
@@ -16,11 +18,16 @@ from std_msgs.msg import Float64, String
 
 from robot_voice_assistant.assistant_factory import BrainSettings, create_backend, create_conversation
 from robot_voice_assistant.conversation import Conversation
+from robot_voice_assistant.motions import is_stop_request
 from robot_voice_assistant.node_runner import run_node
 from robot_voice_assistant.ollama_client import OllamaClient
+from robot_voice_assistant.scene_context import in_conversation
 from robot_voice_assistant.timing import seconds_since
 
 GREETING_FOR_PERSON = "Hello, may I help you?"
+# Said when the motion node stops or refuses a motion to keep its distance from someone.
+SAFE_DISTANCE_REPLY = "I'll stop here, to keep a safe distance from you."
+SAFE_DISTANCE_REPLY_TURN = "You're standing quite close, so I won't turn right now."
 SCENE_STALE_S = 3.0  # an older camera description no longer shows what is in front of the robot
 DEFAULT_KNOWLEDGE_DIR = os.path.join(get_package_share_directory("robot_voice_assistant"), "config", "knowledge")
 
@@ -48,6 +55,8 @@ class BrainNode(Node):
         self._reply_pub = self.create_publisher(String, "/voice/reply", 10)
         self._gesture_pub = self.create_publisher(String, "/robot/gesture", 10)
         self._motion_pub = self.create_publisher(String, "/robot/motion", 10)
+        self._usage_pub = self.create_publisher(String, "/voice/usage", 10)
+        self._last_answer_at: float | None = None  # tokens and timing per answer, as JSON
         self.create_subscription(Float64, "/voice/speech_ended", self._on_speech_ended, 10)
         self.create_subscription(String, "/voice/transcript", self._on_transcript, 10)
         self.create_subscription(String, "/voice/reset", self._on_reset, 10)
@@ -57,6 +66,7 @@ class BrainNode(Node):
         self._scene_time = 0.0
         self.create_subscription(String, "/vision/scene", self._on_scene, 10)
         self.create_subscription(String, "/vision/person_arrived", self._on_person_arrived, 10)
+        self.create_subscription(String, "/robot/motion_blocked", self._on_motion_blocked, 10)
         threading.Thread(target=self._start, daemon=True).start()
 
     def _start(self) -> None:
@@ -70,10 +80,11 @@ class BrainNode(Node):
                 self._conversation, notes = create_conversation(self._settings, self._backend, self._surroundings)
             for note in notes:
                 self.get_logger().info(note)
-            try:
-                OllamaClient(self._settings.ollama_url, self._settings.fallback_model).warm_up()
-            except Exception as error:
-                self.get_logger().warn(f"Local fallback model not available ({error}). Is Ollama running?")
+            if self._backend.has_fallback:  # loading it now keeps the first fallback answer fast
+                try:
+                    OllamaClient(self._settings.ollama_url, self._settings.fallback_model).warm_up()
+                except Exception as error:
+                    self.get_logger().warn(f"Local fallback model not available ({error}). Is Ollama running?")
         walking = "walking enabled" if self._settings.can_walk else "standing in place"
         self.get_logger().info(f"Brain ready ({walking}).")
         with self._pending_lock:  # something said while loading
@@ -85,6 +96,7 @@ class BrainNode(Node):
         with self._busy:
             if self._conversation is not None:
                 self._conversation.reset()
+            self._last_answer_at = None  # the next person is a new visitor
         self.get_logger().info("Conversation history cleared.")
 
     def _on_forget(self, _msg: String) -> None:
@@ -103,8 +115,17 @@ class BrainNode(Node):
             return None
         return self._scene if time.monotonic() - self._scene_time < SCENE_STALE_S else "the camera view is not available"
 
+    def _on_motion_blocked(self, msg: String) -> None:
+        """The motion node kept the robot away from someone: say so, so the person knows why it stopped."""
+        reply = SAFE_DISTANCE_REPLY_TURN if "reach" in msg.data else SAFE_DISTANCE_REPLY
+        self.get_logger().info(f"Motion stopped for safety ({msg.data}): {reply!r}")
+        self._reply_pub.publish(String(data=reply))
+
     def _on_person_arrived(self, _msg: String) -> None:
-        """Someone walked up: greet them, unless the robot is busy answering."""
+        """Someone walked up: greet them, unless the robot is busy answering or already talking with someone."""
+        if in_conversation(time.monotonic(), self._last_answer_at):
+            self.get_logger().info("Someone came into view during a conversation; not greeting again.")
+            return
         if not self._busy.acquire(blocking=False):
             return
         try:
@@ -122,6 +143,9 @@ class BrainNode(Node):
         speech_ended, self._speech_ended = self._speech_ended, None  # typed requests have no spoken end
         if not text:
             return
+        if is_stop_request(text):  # at once, even while answering: the reply can follow, the robot must not walk on
+            self._motion_pub.publish(String(data="stop"))
+            self.get_logger().info("Stop requested; stopping before answering.")
         with self._pending_lock:
             if not self._busy.acquire(blocking=False):
                 earlier = self._pending[0] + " " if self._pending else ""
@@ -138,12 +162,23 @@ class BrainNode(Node):
             line += f"; reply ready {since_speech:.2f} s after you stopped speaking"
         self.get_logger().info(line)
 
+    def _report_usage(self) -> None:
+        """Tokens used by this answer and what is left of Groq's limits: logged, and on /voice/usage (numbers only,
+        never what was said)."""
+        usage, timing = self._backend.last_usage, self._conversation.last_timing
+        if usage is not None:
+            self.get_logger().info(f"Tokens: {usage.summary()}")
+        report = {"backend": self._backend.last_used or "commands", **(asdict(usage) if usage else {}),
+                  "steps_s": dict(timing.steps) if timing is not None else {}}
+        self._usage_pub.publish(String(data=json.dumps(report)))
+
     def _respond(self, text: str, speech_ended: float | None = None) -> None:
         try:
             if self._conversation is None:
                 return
             if (view := self._surroundings()) is not None:
                 self.get_logger().info(f"Camera view for this answer: {view}")
+            self._backend.last_used, self._backend.last_usage = "", None
             try:
                 response = self._conversation.respond(text)
             except Exception as error:  # network or server failure must not kill the node
@@ -151,13 +186,17 @@ class BrainNode(Node):
                 self._log_timing(speech_ended)
                 self._reply_pub.publish(String(data="Sorry, I can't think right now. Please try again in a moment."))
                 return
-            if self._backend.last_error:
+            if self._backend.last_error and self._backend.has_fallback:
                 self.get_logger().warn(f"Groq unavailable ({self._backend.last_error}); answered with the local model.")
+            elif self._backend.last_error:
+                self.get_logger().warn(f"Groq {self._backend.last_error}.")
             self.get_logger().info(
                 f"[{self._backend.last_used or 'commands'}] Reply: {response.reply!r} "
                 f"gesture={response.gesture} motion={response.motion}"
             )
             self._log_timing(speech_ended)
+            self._report_usage()
+            self._last_answer_at = time.monotonic()
             self._gesture_pub.publish(String(data=response.gesture))
             if response.motion != "none":
                 self._motion_pub.publish(String(data=response.motion))

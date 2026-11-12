@@ -5,6 +5,7 @@ from datetime import datetime
 import pytest
 
 from robot_voice_assistant.conversation import (
+    OFFLINE_COMMAND_REPLIES,
     Conversation,
     ExampleTurn,
     looks_truncated,
@@ -342,7 +343,7 @@ def test_timing_is_recorded_when_the_language_model_fails() -> None:
         backend, "G1", GESTURES, motion_descriptions=WALK_MOTIONS, examples=(), clock=lambda: FIXED_NOW,
         command_matcher=FakeMatcher("walk_forward"),
     )
-    conversation.respond("Walk forward")
+    conversation.respond("Walk forward to the door")  # not a plain command: the model is asked
     assert conversation.last_timing is not None
     assert [name for name, _ in conversation.last_timing.steps][:2] == ["knowledge search", "language model"]
 
@@ -359,3 +360,66 @@ def test_system_prompt_warns_that_names_may_be_misheard() -> None:
     backend = FakeBackend(['{"reply": "In Dubai.", "gesture": "none"}'])
     _conversation(backend).respond("Where is ideology based?")
     assert "ideology" in backend.calls[0][0]["content"].lower()
+
+
+TURN_MOTIONS = {**WALK_MOTIONS, "turn_left": "turn 90 degrees to the left", "walk_backward": "step back"}
+PHRASES = {"turn_left": ["turn left"], "walk_forward": ["come here", "walk forward"], "walk_backward": ["step back"],
+           "wave_right": ["wave at me"], "nod": ["nod"]}
+
+
+def _commands(backend: FakeBackend, motions: dict[str, str] | None = TURN_MOTIONS) -> Conversation:
+    return Conversation(backend, "G1", GESTURES, motion_descriptions=motions, examples=(), clock=lambda: FIXED_NOW,
+                        command_phrases=PHRASES)
+
+
+def test_a_plain_command_is_done_without_the_language_model() -> None:
+    backend = FakeBackend([])  # any call to the model would fail
+    conversation = _commands(backend)
+    for said, motion in [("Please turn left.", "turn_left"), ("Come here!", "walk_forward"),
+                         ("Step back a little.", "walk_backward"), ("Okay R1, walk forward please", "walk_forward")]:
+        response = conversation.respond(said)
+        assert (response.motion, response.reply) == (motion, OFFLINE_COMMAND_REPLIES[motion]), said
+    assert backend.calls == [] and conversation.last_timing.steps[0][0] == "command (no language model)"
+
+
+def test_a_plain_gesture_request_is_done_without_the_language_model() -> None:
+    backend = FakeBackend([])
+    response = _commands(backend).respond("Can you wave at me?")
+    assert response.gesture == "wave_right" and response.reply and backend.calls == []
+
+
+def test_questions_greetings_and_longer_requests_still_go_to_the_language_model() -> None:
+    for said in ["What does turn left mean?", "Hello!", "Turn left and tell me what you see", "Move closer",
+                 "Turn around again so you face me"]:
+        backend = FakeBackend(['{"reply": "Okay.", "gesture": "none", "motion": "none"}'])
+        _commands(backend).respond(said)
+        assert len(backend.calls) == 1, said
+
+
+def test_the_language_model_still_hears_about_commands_done_without_it() -> None:
+    backend = FakeBackend(['{"reply": "You asked me to turn left.", "gesture": "none", "motion": "none"}'])
+    conversation = _commands(backend)
+    conversation.respond("Turn left")
+    conversation.respond("What did I just ask you to do?")
+    assert any("Turn left" in message["content"] for message in backend.calls[0][1:])
+
+
+def test_the_prompt_stays_small_so_groq_s_token_limits_go_further() -> None:
+    from robot_voice_assistant.conversation import WALKING_EXAMPLES, build_system_prompt
+    from robot_voice_assistant.gestures import GESTURE_DESCRIPTIONS
+    from robot_voice_assistant.motions import MOTION_DESCRIPTIONS
+
+    prompt = build_system_prompt("R1", GESTURE_DESCRIPTIONS, "", FIXED_NOW, MOTION_DESCRIPTIONS,
+                                 surroundings="a person right in front of you, close, holding an apple")
+    examples = "".join(m["content"] for example in WALKING_EXAMPLES for m in example.as_messages(True))
+    # about 4 characters a token: ~1,000 tokens of instructions and ~400 of examples (was ~1,280 and ~720)
+    assert len(prompt) < 4_000, len(prompt)
+    assert len(WALKING_EXAMPLES) <= 10 and len(examples) < 1_600, (len(WALKING_EXAMPLES), len(examples))
+
+
+def test_the_examples_teach_what_the_model_still_decides_about_moving() -> None:
+    from robot_voice_assistant.conversation import WALKING_EXAMPLES
+
+    both = [e for e in WALKING_EXAMPLES if e.motion != "none" and e.gesture != "none"]
+    assert both  # walking and a gesture in one request ("come over here and wave")
+    assert any(e.motion == "none" and "can't" in e.reply for e in WALKING_EXAMPLES)  # something it cannot do

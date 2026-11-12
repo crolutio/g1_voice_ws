@@ -107,22 +107,16 @@ DEFAULT_EXAMPLES: tuple[ExampleTurn, ...] = (
     ExampleTurn("Okay, thanks a lot. Bye!", "You're welcome! It was lovely talking with you. Goodbye!", "wave_right"),
 )
 
-# With the walking policy: the same examples, but the robot walks when asked and stays put otherwise.
+# With the walking policy. Plain commands ("Turn left", "Stop!") are done without the language model, so the examples
+# teach only what it still decides: tone and length, honesty about what it cannot know or do, and requests that mix
+# moving with something else. Few, to keep every request small (Groq counts every prompt token against its limits).
 WALKING_EXAMPLES: tuple[ExampleTurn, ...] = (
-    *(example for example in DEFAULT_EXAMPLES if example.user != "Can you come over here?"),
-    ExampleTurn("Can you come over here?", "Sure, I'm coming over to you now.", "none", "walk_forward"),
-    ExampleTurn("Turn to your left, please.", "Okay, turning to my left.", "none", "turn_left"),
-    ExampleTurn("Walk over to me.", "On my way!", "wave_right", "walk_forward"),
-    ExampleTurn("Now turn right.", "Turning right.", "none", "turn_right"),
-    ExampleTurn("Keep walking.", "Alright, I'll keep walking until you tell me to stop.", "none", "keep_walking"),
-    ExampleTurn("Stop!", "Okay, I've stopped.", "none", "stop"),
+    *(example for example in DEFAULT_EXAMPLES if example.user in (
+        "Hi there!", "What is the capital of Japan?", "Who won the last football World Cup?",
+        "What's the weather like today?", "Purple running seven the table.", "Okay, thanks a lot. Bye!")),
+    ExampleTurn("Can you come over here and wave?", "Sure, I'm coming over to you now.", "wave_right", "walk_forward"),
+    ExampleTurn("Turn around so you face me.", "Okay, turning around to face you.", "none", "turn_around"),
     ExampleTurn("Can you jump?", "I'm sorry, I can't jump. I can walk forward and backward and turn, though.", "shrug"),
-    ExampleTurn("Walk backwards please.", "Okay, stepping back.", "none", "walk_backward"),
-    ExampleTurn(
-        "Step to your left.",
-        "Sorry, I can't step sideways yet. I can turn left and walk that way, though.",
-        "shrug",
-    ),
 )
 
 
@@ -151,6 +145,25 @@ OFFLINE_COMMAND_REPLIES: dict[str, str] = {
     "walk_backward": "Okay, stepping back.",
 }
 OFFLINE_GESTURE_REPLY = "Sure."
+# Said when a plain gesture request is done without the language model.
+DIRECT_GESTURE_REPLIES: dict[str, str] = {
+    "wave_right": "Hello there!", "wave_left": "Hello there!", "bow": "Thank you.", "celebrate": "Hooray!",
+    "nod": "Yes.", "shake": "No.", "shrug": "I'm not sure.", "point_forward": "Over there.",
+    "open_arms": "Welcome!", "look_left": "Looking left.", "look_right": "Looking right.", "think": "Hmm, let me think.",
+}
+# A plain command ("Stop.", "Can you wave at me?", "Please turn left") is done at once, without the language model:
+# no tokens, no wait, and it works while Groq is rate-limited. Only when, without the polite words around it, it is
+# exactly one of the command's example phrases: the embedding matcher's scores do not separate commands from other
+# short sentences well enough ("Hello!" scores higher for a wave than "Could you nod?" does for a nod).
+_POLITE = re.compile(r"^(?:(?:hey|hi|okay|ok|so|now|r1|robot|please|can you|could you|would you|will you|"
+                     r"go ahead and|i want you to)\b\s*)+|(?:\s*\b(?:please|for me|now|r1|robot|again|a little|a bit))+$",
+                     re.IGNORECASE)
+
+
+def plain_command(text: str) -> str:
+    """What is left of a short request without its polite words: "Can you wave at me?" -> "wave at me"."""
+    core = " ".join(re.sub(r"[^\w\s']", " ", text.lower()).split())
+    return " ".join(_POLITE.sub("", core).split())
 
 
 def build_system_prompt(
@@ -166,19 +179,16 @@ def build_system_prompt(
     if motion_descriptions:
         motion_lines = "\n".join(f"- {name}: {description}" for name, description in motion_descriptions.items())
         body = (
-            "- About yourself: you have a real humanoid body with legs, arms, a waist and a head on a neck, but no hands, "
-            "and you can walk "
-            "on the flat floor of this simulation: forward, backward and turning. Stepping sideways, jumping, running, climbing and picking things up are not possible. You cannot see, "
-            "browse the internet, or know live information such as news, weather or prices.\n\n"
+            "- About yourself: a humanoid body with legs, arms, a waist and a head, but no hands. You can walk forward "
+            "and backward and turn on the flat floor; not step sideways, jump, run, climb or pick things up. You "
+            "cannot see, browse the internet, or know live information such as news, weather or prices.\n\n"
         )
         movement = (
-            "If the person asks you to do a gesture you have, do it and say so briefly.\n\n"
-            "Also pick one walking motion with every reply. Pick a motion only when the person asks you to move; "
-            "otherwise pick none:\n"
+            "If asked for a gesture you have, do it and say so briefly.\n\n"
+            "Also pick one walking motion with every reply; none unless the person asks you to move:\n"
             f"{motion_lines}\n"
-            "When the person asks you to come, walk, turn, step or stop, always do it: pick the matching motion and "
-            "say that you are doing it. Never answer that you are already there or that you cannot tell the "
-            "direction; you and the person share the same room in the simulation."
+            "When asked to come, walk, turn, step or stop, always do it and say so; never say you are already there "
+            "or cannot tell the direction (you share the room with the person)."
         )
         answer_format = '{"reply": "...", "gesture": "...", "motion": "..."}'
     else:
@@ -197,11 +207,10 @@ def build_system_prompt(
         body = body.replace("You cannot see, browse the internet,", "You cannot browse the internet,")
         body += (
             "What you see right now through the camera in your head: "
-            f"{surroundings.strip().rstrip('.')}. This is the current view: it replaces anything you saw or said "
-            "earlier in the conversation, because things are moved and people walk by. Use it when the person asks "
-            "what you see, what something is, or who is there; something they show you is usually right in front of "
-            "you, and \"a person ... holding X\" is what the person talking to you has in their hand. Name only what is listed here; if it is not listed, say you cannot see it clearly. Do not mention "
-            "it otherwise.\n\n"
+            f"{surroundings.strip().rstrip('.')}. It replaces anything seen or said earlier. Use it when asked what "
+            "you see, what something is or who is there, and mention everything in it then; \"a person ... holding "
+            "X\" is what the person talking to you holds. Name only what is listed; if something is not, say you "
+            "cannot see it clearly. Do not mention the view otherwise.\n\n"
         )
     knowledge_section = (
         "\n\nBackground knowledge. Use it when the person asks about these topics, and keep its facts "
@@ -213,32 +222,23 @@ def build_system_prompt(
     return (
         f"You are {robot_name}, a friendly and knowledgeable Unitree R1 humanoid robot. You stand in a "
         "simulation and talk with a person by voice: they speak, and your reply is read aloud.\n\n"
-        "You can talk about anything: general knowledge, geography, history, science, math, technology, "
-        "language, everyday advice, small talk and jokes.\n\n"
+        "You can talk about anything, from science and history to everyday advice, small talk and jokes.\n\n"
         "How to answer:\n"
-        "- Answer the question directly and correctly first, in a full sentence, then add one interesting or "
-        "useful detail if it helps.\n"
-        "- Your reply is spoken, so keep it short: usually one to three sentences and never more than four. "
-        "When asked to tell about something, give the most important points, not everything you know.\n"
-        "- Speak naturally, like a person in a conversation. Never use lists or numbered points, markdown, "
-        "emojis, links or stage directions; join ideas into normal sentences instead.\n"
-        "- Never invent facts. If you are not sure, say so honestly.\n"
-        "- Your knowledge comes from training data that ends a few years before today's date. For anything that "
-        "changes over time, such as who currently holds an office or a job, populations, prices, records or the "
-        "latest version of something, say what you last knew and add that it may have changed since.\n"
-        "- Use the earlier conversation to understand follow-up questions such as 'and what about China?'.\n"
-        "- The person's words come from speech recognition and may be misheard. If a sentence does not make "
-        "sense, say you did not catch it and ask them to repeat it. Speech recognition sometimes writes the "
-        "company name Aideology as ideology, etiology or Eidology: when a question with such a word makes more "
-        "sense about Aideology, answer it about Aideology.\n"
-        "- When the person says thanks, reply briefly and warmly; do not introduce yourself again.\n"
-        "- You keep listening once the person has said 'robot', until they end the conversation with goodbye, "
-        "stop listening, that's all or go to sleep. Then say a short, warm goodbye and tell them to say 'robot' "
-        "when they want to talk again.\n"
+        "- Answer directly and correctly first, in a full sentence; add one useful detail if it helps.\n"
+        "- Your reply is spoken: one to three sentences, never more than four.\n"
+        "- Speak naturally. No lists, markdown, emojis, links or stage directions.\n"
+        "- Never invent facts; if unsure, say so. For things that change over time (office holders, prices, "
+        "records) say what you last knew and that it may have changed.\n"
+        "- Use the earlier conversation for follow-up questions.\n"
+        "- The words come from speech recognition and may be misheard: if a sentence makes no sense, ask them to "
+        "repeat it. Aideology is often misheard as ideology, etiology or Eidology; answer about Aideology when that "
+        "makes more sense.\n"
+        "- When thanked, reply briefly and warmly without introducing yourself again.\n"
+        "- You keep listening after the person says 'robot' until they say goodbye, stop listening, that's all or go "
+        "to sleep; then say a short, warm goodbye and tell them to say 'robot' when they want to talk again.\n"
         f"{body}"
         f"Today is {now:%A, %-d %B %Y} and the local time is {now:%H:%M}.\n\n"
-        "With every reply, pick the one body gesture that fits it best. Use a gesture whenever one fits "
-        "naturally and choose none only when nothing fits:\n"
+        "With every reply pick the body gesture that fits best (none only when nothing fits):\n"
         f"{gesture_lines}\n"
         f"{movement}"
         f"{knowledge_section}\n\n"
@@ -262,14 +262,18 @@ class Conversation:
         retriever: ContextRetriever | None = None,
         command_matcher: CommandMatcherLike | None = None,
         surroundings: Callable[[], str | None] | None = None,
+        command_phrases: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         """``motion_descriptions`` enables walking (None = the robot stands in place).
 
         ``retriever`` replaces the fixed ``background_knowledge`` with knowledge and memories found for each
-        question; ``command_matcher`` recognises clear gesture and walking commands by meaning.
+        question; ``command_matcher`` recognises clear gesture and walking commands by meaning; a sentence that is
+        word for word one of the ``command_phrases`` is done without asking the language model.
         """
         self._retriever = retriever
         self._command_matcher = command_matcher
+        self._phrase_commands = {plain_command(phrase): command
+                                 for command, phrases in (command_phrases or {}).items() for phrase in phrases}
         self._surroundings = surroundings  # what the head camera sees now (see scene_context.py)
         self._backend = backend
         self._robot_name = robot_name
@@ -364,9 +368,34 @@ class Conversation:
             response = replace(response, gesture=gesture)
         return response
 
+    def _direct_command(self, user_text: str) -> AssistantResponse | None:
+        """A plain command, word for word one of its example phrases: done without asking the language model."""
+        command = self._phrase_commands.get(plain_command(user_text))
+        if command is None:
+            return None
+        if command in self._motion_names and self._motion_descriptions:
+            return AssistantResponse(OFFLINE_COMMAND_REPLIES.get(command, "Okay."), NO_MOTION, command)
+        if command in self._gesture_names:
+            return AssistantResponse(DIRECT_GESTURE_REPLIES.get(command, OFFLINE_GESTURE_REPLY), command)
+        return None
+
+    def _add_to_history(self, user_text: str, response: AssistantResponse) -> None:
+        answer = _answer_json(response, self._motion_descriptions is not None)
+        self._history += [
+            {"role": "user", "content": quote_user(user_text)},
+            {"role": "assistant", "content": answer},
+        ]
+        self._history = self._history[-2 * self._history_turns :]
+
     def respond(self, user_text: str) -> AssistantResponse:
         """Ask the language model; raises if it fails and the sentence is not a clear command."""
         timer = self.last_timing = StepTimer()
+        with timer.step("command (no language model)"):
+            direct = self._direct_command(user_text)
+        if direct is not None:
+            self._add_to_history(user_text, direct)  # the model hears about it when asked something next
+            return direct
+        timer.steps.clear()  # no plain command: time the answer as before
         with timer.step("knowledge search"):
             messages = self._messages(user_text)
         try:
@@ -393,12 +422,7 @@ class Conversation:
         # neither in the chat history (the model would repeat it for the next thing shown) nor in long-term memory
         about_the_view = self._surroundings is not None and is_about_the_view(user_text)
         if not about_the_view:
-            answer = _answer_json(response, self._motion_descriptions is not None)
-            self._history += [
-                {"role": "user", "content": quote_user(user_text)},
-                {"role": "assistant", "content": answer},
-            ]
-            self._history = self._history[-2 * self._history_turns :]
+            self._add_to_history(user_text, response)
         if self._retriever is not None and not about_the_view:
             with timer.step("memory write"):
                 self._retriever.remember(user_text, response.reply)

@@ -156,3 +156,82 @@ def test_empty_answer_counts_as_a_failure(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(requests, "post", lambda *a, **k: _ok(""))
     with pytest.raises(ValueError):
         GroqClient(api_key="k", model="openai/gpt-oss-120b").chat(MESSAGES, SCHEMA)
+
+
+def test_groq_reports_the_tokens_used_and_what_is_left_of_the_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    body = {"choices": [{"message": {"content": '{"reply": "Hi"}'}}],
+            "usage": {"prompt_tokens": 1200, "completion_tokens": 25, "total_tokens": 1225}}
+    headers = {"x-ratelimit-limit-requests": "1000", "x-ratelimit-remaining-requests": "998",
+               "x-ratelimit-limit-tokens": "6000", "x-ratelimit-remaining-tokens": "4775"}
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse(200, body, headers))
+    client = GroqClient(api_key="k", model="m")
+    client.chat(MESSAGES, SCHEMA)
+    usage = client.last_usage
+    assert (usage.prompt_tokens, usage.completion_tokens) == (1200, 25)
+    assert (usage.requests_per_day, usage.requests_left_today) == (1000, 998)
+    assert (usage.tokens_per_minute, usage.tokens_left_this_minute) == (6000, 4775)
+
+
+def test_groq_without_usage_or_limit_headers_reports_what_it_has(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _ok('{"reply": "Hi"}'))
+    client = GroqClient(api_key="k", model="m")
+    client.chat(MESSAGES, SCHEMA)
+    assert client.last_usage.prompt_tokens == 0 and client.last_usage.requests_per_day is None
+
+
+def test_the_local_model_reports_its_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    from robot_voice_assistant.ollama_client import OllamaClient
+
+    body = {"message": {"content": '{"reply": "Hi"}'}, "prompt_eval_count": 900, "eval_count": 30}
+    monkeypatch.setattr(requests, "post", lambda *a, **k: FakeResponse(200, body))
+    client = OllamaClient.__new__(OllamaClient)
+    client._chat_url, client._model, client._keep_alive, client._timeout_s = "http://x/api/chat", "m", "5m", 1.0
+    client.chat(MESSAGES, SCHEMA)
+    assert (client.last_usage.prompt_tokens, client.last_usage.completion_tokens) == (900, 30)
+
+
+def test_the_fallback_reports_the_tokens_of_the_model_that_answered() -> None:
+    from robot_voice_assistant.llm_backends import TokenUsage
+
+    class Answering:
+        def __init__(self, usage: TokenUsage, fail: bool = False) -> None:
+            self.last_usage, self.fail = usage, fail
+
+        def chat(self, *_args: object) -> str:
+            if self.fail:
+                raise requests.ConnectionError("down")
+            return "{}"
+
+    groq, llama = Answering(TokenUsage(1000, 20)), Answering(TokenUsage(800, 40))
+    backend = FallbackBackend(groq, llama)
+    backend.chat(MESSAGES, SCHEMA)
+    assert backend.last_usage.prompt_tokens == 1000
+    groq.fail = True
+    backend.chat(MESSAGES, SCHEMA)
+    assert backend.last_usage.prompt_tokens == 800
+
+
+def test_without_a_local_model_a_short_rate_limit_is_waited_out() -> None:
+    groq = FakeBackend("groq", [RateLimitedError(4.0), '{"reply": "Hi"}'])
+    slept: list[float] = []
+    backend = FallbackBackend(groq, None, sleep=slept.append)
+    assert backend.chat(MESSAGES, SCHEMA) == '{"reply": "Hi"}'
+    assert slept == [4.0] and backend.last_used == "groq" and groq.calls == 2
+
+
+def test_without_a_local_model_a_long_rate_limit_or_an_error_fails() -> None:
+    long_wait = FallbackBackend(FakeBackend("groq", [RateLimitedError(60.0)]), None, sleep=lambda _s: None)
+    with pytest.raises(RateLimitedError):
+        long_wait.chat(MESSAGES, SCHEMA)
+    down = FallbackBackend(FakeBackend("groq", [requests.ConnectionError("down")]), None, sleep=lambda _s: None)
+    with pytest.raises(requests.ConnectionError):
+        down.chat(MESSAGES, SCHEMA)
+
+
+def test_the_local_model_can_be_left_out() -> None:
+    from robot_voice_assistant.assistant_factory import BrainSettings, create_backend
+
+    backend, description = create_backend(BrainSettings(use_local_fallback=False), {"GROQ_API_KEY": "k"})
+    assert not backend.has_fallback and "no local model" in description
+    backend, _ = create_backend(BrainSettings(use_local_fallback=False), {})  # no Groq key: the local model is all
+    assert backend.has_fallback

@@ -7,6 +7,8 @@ from typing import TypedDict
 
 import requests
 
+from robot_voice_assistant.token_usage import TokenUsage
+
 
 class ChatMessage(TypedDict):
     role: str
@@ -32,6 +34,7 @@ class OllamaClient:
         self._model = model
         self._timeout_s = timeout_s
         self._keep_alive = keep_alive
+        self.last_usage: TokenUsage | None = None
 
     def warm_up(self) -> None:
         """Load the model into GPU memory now so the first real question answers quickly."""
@@ -56,4 +59,6 @@ class OllamaClient:
             timeout=self._timeout_s,
         )
         response.raise_for_status()
-        return str(response.json()["message"]["content"])
+        body = response.json()
+        self.last_usage = TokenUsage(int(body.get("prompt_eval_count", 0)), int(body.get("eval_count", 0)))
+        return str(body["message"]["content"])

@@ -1,4 +1,5 @@
 import re
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,7 @@ class WordOverlapEmbedder:
         for row, text in enumerate(texts):
             for word in re.findall(r"[a-z]+", text.lower()):
                 if len(word) > 2:
-                    vectors[row, hash(word) % VOCABULARY_SIZE] += 1.0
+                    vectors[row, zlib.crc32(word.encode()) % VOCABULARY_SIZE] += 1.0  # hash() differs per run
         norms = np.linalg.norm(vectors, axis=1, keepdims=True)
         return vectors / np.where(norms == 0, 1, norms)
 
