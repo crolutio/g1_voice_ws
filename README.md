@@ -2,7 +2,7 @@
 
 A simulated **Unitree R1 EDU** humanoid robot (26 degrees of freedom, no hands) that you can talk to and that walks when you ask it to. It runs in NVIDIA Isaac Sim and is connected through ROS 2.
 
-- **Listens** to your microphone and turns speech into text (Whisper large-v3-turbo, on the GPU).
+- **Listens** to your microphone and turns speech into text (Whisper large-v3-turbo, on the GPU), in **English or Arabic**.
 - **Thinks** of an answer with Groq's `qwen/qwen3.8-27b` (in the cloud), falling back to a local `llama3.1:8b` when Groq is unavailable.
 - **Speaks** the answer out loud with an NVIDIA Riva voice (Magpie TTS in NVIDIA's cloud), or with Qwen3-TTS on this computer when there is no NVIDIA key or no internet.
 - **Moves**: gestures with its arms, waist and head while it talks, and walks forward and backward and turns when asked.
@@ -135,7 +135,7 @@ echo 'export NVIDIA_API_KEY="nvapi-your-key-here"' >> ~/.bashrc && source ~/.bas
 Without the key, or when NVIDIA cannot be reached, the robot speaks with Qwen3-TTS on this computer instead (after a failure it tries NVIDIA again 30 seconds later). The log says which voice is used:
 
 ```text
-[tts_node]: TTS ready (NVIDIA Riva, voice Magpie-Multilingual.EN-US.Ray; local Qwen3-TTS if unreachable).
+[tts_node]: TTS ready (NVIDIA Riva, voices Magpie-Multilingual.EN-US.Ray and Magpie-Multilingual.AR-XA.Ray; local Qwen3-TTS, English only, if unreachable).
 [tts_node]: NVIDIA_API_KEY is not set, so the Riva voice is off; using Qwen3-TTS.
 ```
 
@@ -421,7 +421,7 @@ The log shows when a conversation starts and ends:
 The assistant terminal shows what it understood and decided:
 
 ```text
-[stt_node]: Heard: come over here
+[stt_node]: Heard (en): come over here
 [brain_node]: [groq] Reply: "Sure, I'm coming over to you now." gesture=wave_right motion=walk_forward
 [motion_node]: Motion: walk_forward
 [gesture_node]: Playing 'wave_right' (3.8s)
@@ -441,6 +441,25 @@ The robot uses a general-purpose language model, so you can ask about almost any
 - **About itself**: it knows it is a Unitree R1 with arms, a waist and a head but no hands, and that it can walk forward and backward and turn, but not step sideways, jump or pick things up.
 
 Answers are kept to at most four sentences, because they are spoken. Ask "tell me more" for details.
+
+### Speaking Arabic
+
+The robot talks in **English and Arabic**. Just speak: each sentence's language is detected, and the robot answers in the same language, so a visitor can switch at any time.
+
+| Part | What happens in Arabic |
+| ---- | ---------------------- |
+| Listening | Whisper detects English or Arabic for every sentence and writes Arabic in Arabic letters (speech to text took about 0.3 s per sentence in both languages in the tests). The log shows the language: `Heard (ar): ...` |
+| Mixing languages | A sentence that mixes English and Arabic ("ممكن walk forward شوي", "could you walk forward a little") is written down both ways and the version Whisper is surer of is kept, usually Arabic letters with the English words in Latin letters. This takes about 0.45 s instead of 0.28 s, only for mixed sentences. The answer comes in the language most of the words were in |
+| Wake word | "روبوت" or "يا روبوت" ("robot", "O robot") starts a conversation (Whisper also writes it "ربوت", which counts too); the wake word alone is greeted with "مرحبا!" |
+| Answers | Groq answers in Modern Standard Arabic. The local llama model writes broken Arabic, so an Arabic question waits for Groq when it is rate limited (up to 20 s) instead of using it |
+| Voice | Arabic sentences are spoken by the NVIDIA voice `Magpie-Multilingual.AR-XA.Ray`, English ones by `EN-US.Ray`, sentence by sentence |
+| Walking and gestures | Ask in Arabic ("امش إلى الأمام", walk forward; "لوح لي", wave at me): the language model picks the motion. "توقف" or "قف" (stop) stops the robot at once, like "stop" |
+| Ending | "مع السلامة", "إلى اللقاء" or "وداعا" (goodbye) ends the conversation, also when Whisper writes it in Latin letters ("Thank you. Ma'a salama.") |
+| The robot's own sentences | Safety replies ("I'll stop here, to keep a safe distance") and "Sorry, I can't think right now" are said in Arabic to someone speaking Arabic. The greeting "Hello, may I help you?" stays English: the visitor has not spoken yet |
+
+**When NVIDIA cannot be reached**, the local Qwen3-TTS voice takes over for English, but it speaks no Arabic: an Arabic reply then gets one English sentence, "Sorry, my Arabic voice is not available right now.", and the robot tries NVIDIA again for the next Arabic sentence.
+
+Limits: Whisper understands Modern Standard Arabic best; Gulf and other dialects are heard less reliably, so try it with the people who will talk to the robot. Plain commands answered without the language model ("wave", "turn left") are English phrases; in Arabic, the language model decides, which takes about a second longer.
 
 ## 7. Gestures and walking
 
@@ -646,13 +665,14 @@ All assistant settings are in `src/robot_voice_assistant/config/voice_assistant.
 
 | Setting           | Default                               | Meaning                                                                                    |
 | ----------------- | ------------------------------------- | ------------------------------------------------------------------------------------------ |
-| `model_size`      | `large-v3-turbo`                      | Whisper model: `large-v3-turbo` (most accurate), `small.en` (faster, less GPU memory)      |
+| `model_size`      | `large-v3-turbo`                      | Whisper model: `large-v3-turbo` (most accurate), `small.en` (faster, less GPU memory, English only) |
+| `languages`       | `[en, ar]`                            | What people may speak; with several, each sentence's language is detected. `[en]` = English only |
 | `device`          | `cuda`                                | `cuda` for the GPU, `cpu` without a GPU                                                    |
 | `mic_device`      | `default`                             | Microphone for `arecord`; list devices with `arecord -l`, for example `plughw:1,6`         |
 | `min_rms`         | `0.01`                                | Lowest sound level that can count as speech                                                |
 | `threshold_ratio` | `2.5`                                 | How much louder than background noise speech must be; lower it if the robot does not react |
-| `wake_words`      | `["robot", "r1", "r one", "are one"]` | Words that start a conversation; `[""]` answers everything (not recommended in a shared room) |
-| `wake_word_sound_alikes` | `["robert"]`                     | What Whisper sometimes writes for "robot"; counts only at the start of a sentence          |
+| `wake_words`      | `["robot", "r1", "r one", "are one", "روبوت", "الروبوت"]` | Words that start a conversation (the last two are "robot" in Arabic); `[""]` answers everything (not recommended in a shared room) |
+| `wake_word_sound_alikes` | `["robert", "ربوت", "الربوت"]`  | What Whisper sometimes writes for "robot"; counts only at the start of a sentence          |
 | `conversation_idle_timeout_s` | `0.0`                     | `0` = a conversation lasts until you say goodbye; e.g. `300` ends it after 5 quiet minutes |
 | `wake_word_wait_s` | `3.0`                                | After the wake word alone, how long to wait for the question before saying hello           |
 | `end_silence_ms`  | `700`                                 | Silence that ends a sentence; `900` hears slightly better in loud noise but answers 0.2 s later |
@@ -708,11 +728,13 @@ In `src/robot_voice_assistant/robot_voice_assistant/conversation.py`:
 | `tts_engine`  | `riva`                                          | `riva` (NVIDIA Riva voice in the cloud, Qwen3-TTS as fallback), `qwen3` (Qwen3-TTS on this computer) or `piper` (instant, more robotic) |
 | `riva_voice`  | `Magpie-Multilingual.EN-US.Ray`                 | Riva voice and style. English voices: Jason, Leo, Ray, Diego, Pascal (male); Mia, Aria, Sofia, Isabela, Louise (female). Jason, Mia, Aria, Leo, Sofia and Ray also have styles such as `.Calm`, `.Neutral`, `.Sad` (only Jason has `.Happy`); list them with `scripts/riva_voices.py --list` |
 | `riva_language` | `en-US`                                       | Language of the Riva voice                                            |
+| `riva_voice_arabic` | `Magpie-Multilingual.AR-XA.Ray`           | Riva voice for Arabic replies (also `AR-XA.Sofia`, `AR-XA.Jason`)     |
+| `riva_language_arabic` | `ar-XA`                                | Language of the Arabic Riva voice                                     |
 | `riva_sample_rate` | `44100`                                    | Sample rate requested from Riva                                       |
 | `riva_speaking_rate` | `0.9`                                    | Speed for the Riva voice (`speaking_rate` is for Qwen3-TTS); Ray is about 224 words per minute at 1.0 and 200 at 0.9 |
 | `qwen_model`  | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`          | Qwen3-TTS model                                                       |
 | `speaker`     | `ryan`                                          | English voices: `aiden`, `dylan`, `eric`, `ryan`                      |
-| `language`    | `english`                                       | Language of the replies                                               |
+| `language`    | `english`                                       | Language of the Qwen3-TTS voice (it has no Arabic)                    |
 | `instruct`    | `""`                                            | Speaking style, for example `"Speak in a warm, friendly tone."`       |
 | `fast_decoding` | `true`                                        | Faster Qwen3-TTS decoding (CUDA graph); `false` = the library's own   |
 | `voice_model` | `~/g1_voice_ws/models/en_US-lessac-medium.onnx` | Piper voice file (only with `tts_engine: piper`)                      |
@@ -739,7 +761,7 @@ In Power saver mode or on battery it is 4 to 6 times slower, which causes long p
 Every log line starts with the local time to the millisecond, and each step logs how long it took. One question in terminal 2 looks like this:
 
 ```text
-[INFO] [2026-10-27 09:50:40.535] [stt_node]: Heard: Robot, what is the capital of India? (3.1 s of speech; waited 0.69 s for silence, speech to text 0.31 s)
+[INFO] [2026-10-27 09:50:40.535] [stt_node]: Heard (en): Robot, what is the capital of India? (3.1 s of speech; waited 0.69 s for silence, speech to text 0.31 s)
 [INFO] [2026-10-27 09:50:42.646] [brain_node]: [groq] Reply: 'The capital of India is New Delhi. ...' gesture=nod motion=none
 [INFO] [2026-10-27 09:50:42.646] [brain_node]: Timing: knowledge search 0.02 s, language model 1.06 s, command matching 0.01 s, memory write 0.01 s, total 1.11 s (groq); reply ready 2.11 s after you stopped speaking
 [INFO] [2026-10-27 09:50:43.798] [tts_node]: Voice started 1.15 s after the reply arrived; 3.26 s after you stopped speaking
@@ -945,6 +967,8 @@ and run the conversations in a second terminal:
 source /opt/ros/jazzy/setup.bash && source ~/g1_voice_ws/.venv/bin/activate && source ~/g1_voice_ws/install/setup.bash
 python ~/g1_voice_ws/src/robot_voice_assistant/scripts/check_conversation_live.py --spool /tmp/robot_mic
 ```
+
+The scenario `"arabic, voice sofia"` talks Arabic (questions, walking, stop, wave, a switch to English and goodbye); its sentences are spoken by an NVIDIA Riva voice, so generating them once needs `NVIDIA_API_KEY`. Run only it with `--scenario "arabic, voice sofia"`. `"mixed english and arabic"` mixes both languages in each sentence (Arabic pieces by the NVIDIA voice, English ones by Qwen3-TTS).
 
 ### Check the conversation quality
 

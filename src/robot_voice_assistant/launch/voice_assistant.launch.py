@@ -35,7 +35,8 @@ def generate_launch_description() -> LaunchDescription:
                 "RCUTILS_CONSOLE_OUTPUT_FORMAT", os.environ.get("RCUTILS_CONSOLE_OUTPUT_FORMAT", LOG_FORMAT)
             ),
             DeclareLaunchArgument("config", default_value=default_config),
-            DeclareLaunchArgument("overrides", default_value=default_config,
+            # defaults to config itself, so config:=<file> alone is not undone by the package's own settings
+            DeclareLaunchArgument("overrides", default_value=config,
                                   description="a parameter file applied after config (default: config again)"),
             DeclareLaunchArgument("use_microphone", default_value="true",
                                   description="false = type messages on /voice/transcript instead of speaking"),

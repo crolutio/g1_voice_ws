@@ -36,3 +36,13 @@ def test_babble_of_a_few_alternating_words_is_rejected() -> None:
 
 def test_a_normal_long_sentence_is_kept() -> None:
     assert is_meaningful_transcript("Tell me about the company and what the company does for the people.", 0.1)
+
+
+def test_an_arabic_sentence_is_kept() -> None:
+    assert normalize("ماذا يوجد في يدي؟") == "ماذا يوجد في يدي"
+    assert is_meaningful_transcript("ماذا يوجد في يدي؟", 0.05)
+
+
+def test_what_whisper_invents_in_arabic_on_silence_is_rejected() -> None:
+    assert not is_meaningful_transcript("اشتركوا في القناة", 0.1)  # "subscribe to the channel"
+    assert not is_meaningful_transcript("شكرا للمشاهدة.", 0.1)  # "thanks for watching"

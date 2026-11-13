@@ -10,7 +10,9 @@ from datetime import datetime
 from typing import Protocol
 
 from robot_voice_assistant.arithmetic import find_arithmetic, spoken_calculation
-from robot_voice_assistant.assistant_response import NO_GESTURE, NO_MOTION, AssistantResponse, parse_assistant_response
+from robot_voice_assistant.assistant_response import (FALLBACK_REPLY, NO_GESTURE, NO_MOTION, AssistantResponse,
+                                                      parse_assistant_response)
+from robot_voice_assistant.language import ARABIC, language_of
 from robot_voice_assistant.llm_backends import ChatBackend
 from robot_voice_assistant.ollama_client import ChatMessage, build_response_schema
 from robot_voice_assistant.scene_context import NOTHING_SEEN_HELD, about_their_hand_unseen, is_about_the_view
@@ -30,7 +32,7 @@ def quote_user(text: str) -> str:
 
 MAX_SPOKEN_SENTENCES = 4
 # A sentence ends at . ! or ? followed by a space and a capital letter, digit or quote ("8,848.86 m" stays whole).
-_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'])")
+_SENTENCE_END = re.compile(r"(?<=[.!?\u061f])\s+(?=[A-Z0-9\"'\u0600-\u06ff])")  # \u061f: Arabic question mark
 
 
 def split_sentences(text: str) -> list[str]:
@@ -59,7 +61,7 @@ def _answer_json(response: AssistantResponse, with_motion: bool) -> str:
     fields = {"reply": response.reply, "gesture": response.gesture}
     if with_motion:
         fields["motion"] = response.motion
-    return json.dumps(fields)
+    return json.dumps(fields, ensure_ascii=False)  # Arabic as letters: the model copies escape codes
 
 
 DEFAULT_EXAMPLES: tuple[ExampleTurn, ...] = (
@@ -145,6 +147,18 @@ OFFLINE_COMMAND_REPLIES: dict[str, str] = {
     "walk_backward": "Okay, stepping back.",
 }
 OFFLINE_GESTURE_REPLY = "Sure."
+# The same, for a command said in Arabic
+ARABIC_OFFLINE_COMMAND_REPLIES: dict[str, str] = {
+    "walk_forward": "حسنا، أنا قادم.",
+    "keep_walking": "حسنا، سأستمر في المشي.",
+    "stop": "حسنا، سأتوقف.",
+    "turn_left": "سأستدير إلى اليسار.",
+    "turn_right": "سأستدير إلى اليمين.",
+    "turn_around": "سأستدير إلى الخلف.",
+    "walk_backward": "حسنا، سأرجع إلى الخلف.",
+}
+ARABIC_OKAY = "حسنا."
+ARABIC_FALLBACK_REPLY = "عذرا، لم أفهم ذلك."  # "Sorry, I did not catch that."
 # Said when a plain gesture request is done without the language model.
 DIRECT_GESTURE_REPLIES: dict[str, str] = {
     "wave_right": "Hello there!", "wave_left": "Hello there!", "bow": "Thank you.", "celebrate": "Hooray!",
@@ -227,6 +241,7 @@ def build_system_prompt(
         "- Answer directly and correctly first, in a full sentence; add one useful detail if it helps.\n"
         "- Your reply is spoken: one to three sentences, never more than four.\n"
         "- Speak naturally. No lists, markdown, emojis, links or stage directions.\n"
+        "- Answer in the language the person spoke: English, or Arabic (Modern Standard Arabic, in Arabic letters).\n"
         "- Never invent facts; if unsure, say so. For things that change over time (office holders, prices, "
         "records) say what you last knew and that it may have changed.\n"
         "- Use the earlier conversation for follow-up questions.\n"
@@ -312,8 +327,8 @@ class Conversation:
         shorten_request: list[ChatMessage] = [
             {
                 "role": "system",
-                "content": "You shorten answers that a robot will say aloud. Rewrite the answer you are given in at "
-                "most three sentences, keeping its meaning and the most important points. Do not add new "
+                "content": "You shorten answers that a robot will say aloud. Rewrite the answer you are given, in the "
+                "same language, in at most three sentences, keeping its meaning and the most important points. Do not add new "
                 f'information. Answer only with JSON: {{"reply": "...", "gesture": "{response.gesture}"}}',
             },
             {"role": "user", "content": f"Answer to shorten: {response.reply}"},
@@ -352,11 +367,14 @@ class Conversation:
         return self._command_matcher.match(user_text, allowed=allowed) if allowed else None
 
     def _offline_response(self, user_text: str) -> AssistantResponse | None:
-        """A clear command can still be carried out when no language model answers."""
+        """A clear command can still be carried out when no language model answers (said in its language)."""
+        arabic = language_of(user_text) == ARABIC
         if self._motion_descriptions and (motion := self._matched_command(user_text, self._motion_names)):
+            if arabic:
+                return AssistantResponse(ARABIC_OFFLINE_COMMAND_REPLIES.get(motion, ARABIC_OKAY), NO_MOTION, motion)
             return AssistantResponse(OFFLINE_COMMAND_REPLIES.get(motion, "Okay."), NO_MOTION, motion)
         if gesture := self._matched_command(user_text, self._gesture_names):
-            return AssistantResponse(OFFLINE_GESTURE_REPLY, gesture)
+            return AssistantResponse(ARABIC_OKAY if arabic else OFFLINE_GESTURE_REPLY, gesture)
         return None
 
     def _fill_in_missed_command(self, user_text: str, response: AssistantResponse) -> AssistantResponse:
@@ -406,6 +424,8 @@ class Conversation:
                     response = self._ask(messages)
             with timer.step("shortening"):
                 response = self._keep_short(response)
+            if response.reply == FALLBACK_REPLY and language_of(user_text) == ARABIC:
+                response = replace(response, reply=ARABIC_FALLBACK_REPLY)
         except Exception:
             with timer.step("command matching"):
                 offline = self._offline_response(user_text)

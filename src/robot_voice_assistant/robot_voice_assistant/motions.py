@@ -173,8 +173,11 @@ MOTION_PHRASES: dict[str, list[str]] = {
 _STOP = re.compile(r"(?:^|[,.!?;]\s*|\b(?:please|okay|ok|now|just|hey|r1|robot)\s+)(?:stop|halt|freeze)\b"
                    r"|\bstand still\b|\bstop (?:walking|moving)\b", re.IGNORECASE)
 _NOT_STOP = re.compile(r"\b(?:don't|dont|do not|never)\s+stop\b", re.IGNORECASE)
+# The same in Arabic: "stop" (توقف, قف, أوقف) at the start or after "O robot,", "now", "please"
+_STOP_ARABIC = re.compile(r"(?:^|[,.!?\u060c\u061f]\s*|\b(?:يا|روبوت|الروبوت|الآن|فقط|رجاء)\s+)(?:توقف|قف|أوقف|اوقف)\b")
 
 
 def is_stop_request(text: str) -> bool:
-    """Whether the person tells the robot to stop moving."""
-    return bool(_STOP.search(text.strip())) and not _NOT_STOP.search(text)
+    """Whether the person tells the robot to stop moving (in English or Arabic)."""
+    said = text.strip()
+    return (bool(_STOP.search(said)) and not _NOT_STOP.search(said)) or bool(_STOP_ARABIC.search(said))

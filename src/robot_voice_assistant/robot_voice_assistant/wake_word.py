@@ -10,9 +10,12 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
+from robot_voice_assistant.language import ARABIC, language_of
+
 GREETING_FOR_BARE_WAKE_WORD = "Hello!"
+ARABIC_GREETING_FOR_BARE_WAKE_WORD = "مرحبا!"  # "Hello!", for a wake word said in Arabic ("يا روبوت")
 # What Whisper writes for "robot" in some voices; counts only at the start of a sentence
-DEFAULT_SOUND_ALIKES = ("robert",)
+DEFAULT_SOUND_ALIKES = ("robert", "ربوت", "الربوت")  # and Whisper's shorter Arabic spelling of "robot"
 
 # Short sentences that end the conversation. "Stop" alone is not one of them: it stops walking.
 END_PHRASES = (
@@ -32,9 +35,22 @@ END_PHRASES = (
     "that will be all",
     "go to sleep",
     "you can sleep",
+    # Arabic: "goodbye" (with peace), "until we meet", "farewell", "bye"
+    "مع السلامة",
+    "إلى اللقاء",
+    "الى اللقاء",
+    "وداعا",
+    "باي",
+    # the same written in Latin letters, as Whisper does in a sentence that starts in English
+    "ma'a salama",
+    "maa salama",
+    "ma salama",
+    "masalama",
+    "ma'assalama",
 )
 MAX_END_SENTENCE_WORDS = 6
-_NON_WORD = re.compile(r"[^a-z0-9' ]+")
+_NON_WORD = re.compile(r"[^\w' ]+")  # keeps the letters of every language (Arabic too)
+_AROUND_WAKE_WORD = " ,.!?-،؟"  # punctuation between the wake word and the request, Arabic comma and question mark too
 
 
 def _normalize(text: str) -> str:
@@ -42,8 +58,10 @@ def _normalize(text: str) -> str:
 
 
 # Words people (or Whisper) put around the wake word that are not part of the request
-_BEFORE_WAKE_WORD = frozenset({"", "a", "oh", "hey", "hi", "hello", "ok", "okay", "the"})
-_GREETINGS = frozenset({"", "hey", "hi", "hello", "hey there", "hi there", "hello there", "ok", "okay"})
+_BEFORE_WAKE_WORD = frozenset({"", "a", "oh", "hey", "hi", "hello", "ok", "okay", "the",
+                               "يا", "أيها", "ايها", "مرحبا", "أهلا", "اهلا"})  # Arabic: "O", "O you", "hello", "hi"
+_GREETINGS = frozenset({"", "hey", "hi", "hello", "hey there", "hi there", "hello there", "ok", "okay",
+                        "مرحبا", "أهلا", "اهلا", "السلام عليكم"})  # Arabic: "hello", "hi", "peace be upon you"
 
 
 def _wake_word_pattern(wake_word: str) -> re.Pattern[str]:
@@ -88,6 +106,7 @@ class WakeWordGate:
         self.in_conversation = False
         self._last_activity_s = float("-inf")
         self._greet_at_s: float | None = None
+        self._greeting = GREETING_FOR_BARE_WAKE_WORD
 
     def start_conversation(self, now_s: float) -> None:
         """The robot spoke first (it greeted someone walking up): the person can answer without the wake word."""
@@ -108,7 +127,7 @@ class WakeWordGate:
             self._greet_at_s = max(self._greet_at_s, now_s + 1.0)
         if self._greet_at_s is not None and now_s >= self._greet_at_s:
             self._greet_at_s = None
-            return GREETING_FOR_BARE_WAKE_WORD
+            return self._greeting
         return None
 
     def accept(self, transcript: str, now_s: float) -> str | None:
@@ -125,6 +144,8 @@ class WakeWordGate:
         self._last_activity_s = now_s
         if request == "":  # only the wake word: the question usually follows after a short pause
             self._greet_at_s = now_s + self._wake_word_wait_s
+            arabic = language_of(text) == ARABIC
+            self._greeting = ARABIC_GREETING_FOR_BARE_WAKE_WORD if arabic else GREETING_FOR_BARE_WAKE_WORD
             return None
         self._greet_at_s = None
         request = request if request is not None else text
@@ -138,8 +159,8 @@ class WakeWordGate:
             match = pattern.search(text)
             if match is None:
                 continue
-            before = text[: match.start()].strip(" ,.!?-")
-            after = text[match.end() :].lstrip(" ,.!?-").rstrip()
+            before = text[: match.start()].strip(_AROUND_WAKE_WORD)
+            after = text[match.end() :].lstrip(_AROUND_WAKE_WORD).rstrip()
             if _normalize(before) in _BEFORE_WAKE_WORD:
                 before = ""
             if _normalize(after) in _GREETINGS:

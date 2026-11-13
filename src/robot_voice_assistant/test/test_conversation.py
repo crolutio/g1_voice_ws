@@ -12,6 +12,7 @@ from robot_voice_assistant.conversation import (
     quote_user,
     split_sentences,
 )
+from robot_voice_assistant.language import language_of
 from robot_voice_assistant.ollama_client import ChatMessage
 
 GESTURES = {"none": "stand still", "nod": "nod yes", "wave_right": "wave"}
@@ -412,8 +413,9 @@ def test_the_prompt_stays_small_so_groq_s_token_limits_go_further() -> None:
     prompt = build_system_prompt("R1", GESTURE_DESCRIPTIONS, "", FIXED_NOW, MOTION_DESCRIPTIONS,
                                  surroundings="a person right in front of you, close, holding an apple")
     examples = "".join(m["content"] for example in WALKING_EXAMPLES for m in example.as_messages(True))
-    # about 4 characters a token: ~1,000 tokens of instructions and ~400 of examples (was ~1,280 and ~720)
-    assert len(prompt) < 4_000, len(prompt)
+    # about 4 characters a token: ~1,000 tokens of instructions and ~400 of examples (was ~1,280 and ~720);
+    # the line about answering in English or Arabic adds about 25 tokens
+    assert len(prompt) < 4_100, len(prompt)
     assert len(WALKING_EXAMPLES) <= 10 and len(examples) < 1_600, (len(WALKING_EXAMPLES), len(examples))
 
 
@@ -423,3 +425,50 @@ def test_the_examples_teach_what_the_model_still_decides_about_moving() -> None:
     both = [e for e in WALKING_EXAMPLES if e.motion != "none" and e.gesture != "none"]
     assert both  # walking and a gesture in one request ("come over here and wave")
     assert any(e.motion == "none" and "can't" in e.reply for e in WALKING_EXAMPLES)  # something it cannot do
+
+
+def test_arabic_replies_are_split_into_sentences() -> None:
+    assert split_sentences("هذه تفاحة. هل تريد المزيد؟ حسنا!") == ["هذه تفاحة.", "هل تريد المزيد؟", "حسنا!"]
+
+
+def test_the_robot_is_told_to_answer_in_the_person_s_language() -> None:
+    backend = FakeBackend(['{"reply": "مرحبا! كيف يمكنني مساعدتك؟", "gesture": "wave_right"}'])
+    response = _conversation(backend).respond("مرحبا")
+    assert "Arabic" in backend.calls[0][0]["content"]
+    assert response.reply == "مرحبا! كيف يمكنني مساعدتك؟"
+
+
+def test_a_long_arabic_answer_is_shortened_in_arabic() -> None:
+    long_reply = "جملة أولى. جملة ثانية. جملة ثالثة. جملة رابعة. جملة خامسة."
+    backend = FakeBackend([json.dumps({"reply": long_reply, "gesture": "none"}),
+                           '{"reply": "جملة قصيرة.", "gesture": "none"}'])
+    assert _conversation(backend).respond("أخبرني عن دبي").reply == "جملة قصيرة."
+    assert "same language" in backend.calls[1][0]["content"]
+
+
+def test_a_clear_arabic_command_is_answered_in_arabic_when_no_language_model_answers() -> None:
+    backend = FakeBackend([ConnectionError("groq and llama both down")])
+    conversation = Conversation(
+        backend, "G1", GESTURES, motion_descriptions=WALK_MOTIONS, examples=(), clock=lambda: FIXED_NOW,
+        command_matcher=FakeMatcher("walk_forward"),
+    )
+    response = conversation.respond("تعال إلى هنا")
+    assert response.motion == "walk_forward"
+    assert language_of(response.reply) == "ar"
+
+
+def test_a_broken_answer_to_an_arabic_question_is_apologised_for_in_arabic() -> None:
+    from robot_voice_assistant.conversation import ARABIC_FALLBACK_REPLY
+
+    backend = FakeBackend(['{"reply": "\\u0627\\u0644\\u064a'])
+    assert _conversation(backend).respond("لوح لي بيدك من فضلك").reply == ARABIC_FALLBACK_REPLY
+
+
+def test_earlier_arabic_answers_are_kept_in_arabic_letters_not_escape_codes() -> None:
+    # history written as "ال..." made the model answer in broken escape codes too
+    backend = FakeBackend(['{"reply": "عاصمة فرنسا هي باريس.", "gesture": "nod"}', '{"reply": "حسنا!", "gesture": "none"}'])
+    conversation = _conversation(backend)
+    conversation.respond("ما هي عاصمة فرنسا؟")
+    conversation.respond("شكرا جزيلا")
+    history_answer = backend.calls[1][-2]["content"]
+    assert "عاصمة فرنسا هي باريس." in history_answer and "\\u" not in history_answer

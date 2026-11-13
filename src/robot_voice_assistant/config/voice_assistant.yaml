@@ -1,9 +1,9 @@
 stt_node:
   ros__parameters:
-    model_size: large-v3-turbo  # Whisper: large-v3-turbo (most accurate), small.en (faster, less GPU memory)
+    model_size: large-v3-turbo  # Whisper: large-v3-turbo (most accurate), small.en (faster, less GPU memory, English only)
     device: cuda
     compute_type: float16
-    language: en
+    languages: [en, ar]       # English and Arabic: each sentence's language is detected (just [en] skips that)
     mic_device: default       # ALSA device for arecord, e.g. "default" or "plughw:1,6"
     recorder: arecord         # program that records the microphone (scripts/fake_microphone.py plays test speech)
     min_rms: 0.01             # lowest level that can count as speech
@@ -13,8 +13,8 @@ stt_node:
     # Saying a wake word starts a conversation: from then on everything is answered without the wake word,
     # until you say goodbye ("goodbye", "stop listening", "that's all", "go to sleep", ...). Outside a
     # conversation, speech is ignored. "Robot" is recognised most reliably. Use [""] to answer everything.
-    wake_words: ["robot", "r1", "r one", "are one"]
-    wake_word_sound_alikes: ["robert"]  # what Whisper sometimes writes for "robot"; only at the start of a sentence
+    wake_words: ["robot", "r1", "r one", "are one", "روبوت", "الروبوت"]  # the last two: "robot" in Arabic
+    wake_word_sound_alikes: ["robert", "ربوت", "الربوت"]  # what Whisper sometimes writes for "robot"; only at the start of a sentence
     conversation_idle_timeout_s: 0.0  # 0 = a conversation lasts until you end it; e.g. 300 = ends after 5 quiet minutes
     wake_word_wait_s: 3.0     # after the wake word alone ("Robot..."), wait this long for the question, then greet
     # Names Whisper should expect (given to it as a prompt), so it writes "Aideology" and not "ideology"
@@ -50,6 +50,8 @@ tts_node:
     tts_engine: riva
     riva_voice: Magpie-Multilingual.EN-US.Ray   # list voices: see README "NVIDIA Riva voices"
     riva_language: en-US
+    riva_voice_arabic: Magpie-Multilingual.AR-XA.Ray   # Arabic replies (also AR-XA.Sofia, AR-XA.Jason)
+    riva_language_arabic: ar-XA
     riva_sample_rate: 44100
     riva_speaking_rate: 0.9   # Ray speaks about 224 words/min; 0.9 gives about 200 (same pitch)
     qwen_model: Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice

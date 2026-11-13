@@ -54,3 +54,10 @@ def test_motion_defaults_to_none() -> None:
 def test_motion_is_ignored_when_walking_is_not_available() -> None:
     raw = '{"reply": "Coming!", "gesture": "none", "motion": "walk_forward"}'
     assert parse_assistant_response(raw, GESTURES).motion == "none"
+
+
+def test_a_cut_off_json_answer_is_never_read_out() -> None:
+    from robot_voice_assistant.assistant_response import FALLBACK_REPLY
+
+    cut_off = '{"reply": "\\u0627\\u0644\\u064a \\u0627\\u0644\\u064a \\u0625\\u064a'
+    assert parse_assistant_response(cut_off, ["none"]).reply == FALLBACK_REPLY

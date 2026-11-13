@@ -38,6 +38,8 @@ def parse_assistant_response(
     data = _load_json_object(raw)
     if data is None:
         text = raw.strip()
+        if text.startswith("{"):  # cut-off or broken JSON: reading it out would be gibberish
+            return AssistantResponse(FALLBACK_REPLY, NO_GESTURE)
         return AssistantResponse(text or FALLBACK_REPLY, NO_GESTURE)
 
     reply = str(data.get("reply", "")).strip() or FALLBACK_REPLY

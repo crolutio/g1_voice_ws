@@ -18,6 +18,7 @@ from std_msgs.msg import Float64, String
 
 from robot_voice_assistant.assistant_factory import BrainSettings, create_backend, create_conversation
 from robot_voice_assistant.conversation import Conversation
+from robot_voice_assistant.language import ARABIC, ENGLISH, language_of
 from robot_voice_assistant.motions import is_stop_request
 from robot_voice_assistant.node_runner import run_node
 from robot_voice_assistant.ollama_client import OllamaClient
@@ -28,6 +29,13 @@ GREETING_FOR_PERSON = "Hello, may I help you?"
 # Said when the motion node stops or refuses a motion to keep its distance from someone.
 SAFE_DISTANCE_REPLY = "I'll stop here, to keep a safe distance from you."
 SAFE_DISTANCE_REPLY_TURN = "You're standing quite close, so I won't turn right now."
+NO_ANSWER_REPLY = "Sorry, I can't think right now. Please try again in a moment."
+# The same, said to someone speaking Arabic (the greeting stays English: the visitor has not spoken yet)
+ARABIC_REPLIES = {
+    SAFE_DISTANCE_REPLY: "سأتوقف هنا لأحافظ على مسافة آمنة منك.",
+    SAFE_DISTANCE_REPLY_TURN: "أنت قريب مني جدا، لذلك لن أستدير الآن.",
+    NO_ANSWER_REPLY: "عذرا، لا أستطيع التفكير الآن. حاول مرة أخرى بعد قليل.",
+}
 SCENE_STALE_S = 3.0  # an older camera description no longer shows what is in front of the robot
 DEFAULT_KNOWLEDGE_DIR = os.path.join(get_package_share_directory("robot_voice_assistant"), "config", "knowledge")
 
@@ -48,6 +56,7 @@ class BrainNode(Node):
         self._conversation: Conversation | None = None
         self._busy = threading.Lock()
         self._speech_ended: float | None = None  # when the person stopped saying the current request (wall clock)
+        self._language = ENGLISH  # what the person spoke last; the robot's fixed sentences are said in it
         # What was said while the brain was busy, answered next (several pieces are joined)
         self._pending: tuple[str, float | None] | None = None
         self._pending_lock = threading.Lock()
@@ -97,6 +106,7 @@ class BrainNode(Node):
             if self._conversation is not None:
                 self._conversation.reset()
             self._last_answer_at = None  # the next person is a new visitor
+            self._language = ENGLISH
         self.get_logger().info("Conversation history cleared.")
 
     def _on_forget(self, _msg: String) -> None:
@@ -117,9 +127,12 @@ class BrainNode(Node):
 
     def _on_motion_blocked(self, msg: String) -> None:
         """The motion node kept the robot away from someone: say so, so the person knows why it stopped."""
-        reply = SAFE_DISTANCE_REPLY_TURN if "reach" in msg.data else SAFE_DISTANCE_REPLY
+        reply = self._in_their_language(SAFE_DISTANCE_REPLY_TURN if "reach" in msg.data else SAFE_DISTANCE_REPLY)
         self.get_logger().info(f"Motion stopped for safety ({msg.data}): {reply!r}")
         self._reply_pub.publish(String(data=reply))
+
+    def _in_their_language(self, reply: str) -> str:
+        return ARABIC_REPLIES.get(reply, reply) if self._language == ARABIC else reply
 
     def _on_person_arrived(self, _msg: String) -> None:
         """Someone walked up: greet them, unless the robot is busy answering or already talking with someone."""
@@ -143,6 +156,7 @@ class BrainNode(Node):
         speech_ended, self._speech_ended = self._speech_ended, None  # typed requests have no spoken end
         if not text:
             return
+        self._language = language_of(text)
         if is_stop_request(text):  # at once, even while answering: the reply can follow, the robot must not walk on
             self._motion_pub.publish(String(data="stop"))
             self.get_logger().info("Stop requested; stopping before answering.")
@@ -184,9 +198,9 @@ class BrainNode(Node):
             except Exception as error:  # network or server failure must not kill the node
                 self.get_logger().error(f"No language model could answer: {error}")
                 self._log_timing(speech_ended)
-                self._reply_pub.publish(String(data="Sorry, I can't think right now. Please try again in a moment."))
+                self._reply_pub.publish(String(data=self._in_their_language(NO_ANSWER_REPLY)))
                 return
-            if self._backend.last_error and self._backend.has_fallback:
+            if self._backend.last_error and self._backend.has_fallback and "waited" not in self._backend.last_error:
                 self.get_logger().warn(f"Groq unavailable ({self._backend.last_error}); answered with the local model.")
             elif self._backend.last_error:
                 self.get_logger().warn(f"Groq {self._backend.last_error}.")

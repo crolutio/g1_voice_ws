@@ -15,7 +15,7 @@ class FakeWhisper:
 
     def transcribe(self, audio: np.ndarray, **options: Any) -> tuple[list[SimpleNamespace], None]:
         self.options = options
-        return [SimpleNamespace(text=text, no_speech_prob=self.no_speech) for text in self.texts], None
+        return [SimpleNamespace(text=text, no_speech_prob=self.no_speech, avg_logprob=-0.3) for text in self.texts], None
 
 
 def test_segments_are_joined_into_one_transcript() -> None:
@@ -70,7 +70,7 @@ class PromptEchoWhisper:
     def transcribe(self, audio: np.ndarray, **options: Any) -> tuple[list[SimpleNamespace], None]:
         self.calls.append(options)
         text = options.get("initial_prompt") or self.speech
-        return [SimpleNamespace(text=" " + text, no_speech_prob=0.05)], None
+        return [SimpleNamespace(text=" " + text, no_speech_prob=0.05, avg_logprob=-0.3)], None
 
 
 def test_a_transcript_that_only_repeats_the_prompt_is_transcribed_again_without_it() -> None:
@@ -96,3 +96,71 @@ def test_a_partial_echo_of_the_prompt_also_counts() -> None:
     assert is_prompt_echo("aideology jorge colotto dubai silicon oasis mds", vocabulary)
     assert not is_prompt_echo("Tell me about Aideology.", vocabulary)
     assert not is_prompt_echo("", vocabulary)
+
+
+class FakeMultilingualWhisper(FakeWhisper):
+    """Detects the language like faster-whisper's WhisperModel.detect_language."""
+
+    def __init__(self, texts: list[str], probabilities: list[tuple[str, float]]) -> None:
+        super().__init__(texts)
+        self.probabilities = probabilities
+
+    def detect_language(self, audio: np.ndarray) -> tuple[str, float, list[tuple[str, float]]]:
+        best = max(self.probabilities, key=lambda pair: pair[1])
+        return best[0], best[1], self.probabilities
+
+
+def test_one_language_is_transcribed_without_detecting_it() -> None:
+    whisper = FakeWhisper(["hi"])
+    transcript = Transcriber(whisper, languages=("en",)).transcribe(np.zeros(16, dtype=np.float32))
+    assert whisper.options["language"] == "en" and transcript.language == "en"
+
+
+def test_with_several_languages_the_spoken_one_is_detected_and_transcribed() -> None:
+    whisper = FakeMultilingualWhisper(["ماذا يوجد في يدي؟"], [("ar", 0.99), ("en", 0.001)])
+    transcript = Transcriber(whisper, languages=("en", "ar")).transcribe(np.zeros(16, dtype=np.float32))
+    assert whisper.options["language"] == "ar"
+    assert transcript.language == "ar" and transcript.text == "ماذا يوجد في يدي؟"
+
+
+def test_detection_keeps_to_the_allowed_languages() -> None:
+    whisper = FakeMultilingualWhisper(["hello"], [("cy", 0.5), ("en", 0.3), ("ar", 0.2)])  # Welsh is not allowed
+    assert Transcriber(whisper, languages=("en", "ar")).transcribe(np.zeros(16, dtype=np.float32)).language == "en"
+
+
+def test_the_english_names_prompt_is_not_given_for_arabic() -> None:
+    # Whisper prompted with English names tends to answer in English instead of writing down the Arabic
+    whisper = FakeMultilingualWhisper(["مرحبا"], [("ar", 0.9)])
+    Transcriber(whisper, languages=("en", "ar"), vocabulary=("Aideology",)).transcribe(np.zeros(16, dtype=np.float32))
+    assert "initial_prompt" not in whisper.options
+
+
+
+class FakeCodeSwitchingWhisper(FakeMultilingualWhisper):
+    """Writes a mixed sentence differently depending on the language it is told, with its own confidence."""
+
+    def __init__(self, by_language: dict[str, tuple[str, float]], probabilities: list[tuple[str, float]]) -> None:
+        super().__init__([], probabilities)
+        self.by_language = by_language
+        self.languages_tried: list[str] = []
+
+    def transcribe(self, audio: np.ndarray, **options: Any) -> tuple[list[SimpleNamespace], None]:
+        self.options = options
+        self.languages_tried.append(options["language"])
+        text, confidence = self.by_language[options["language"]]
+        return [SimpleNamespace(text=text, no_speech_prob=0.1, avg_logprob=confidence)], None
+
+
+def test_a_sentence_mixing_english_and_arabic_is_written_down_both_ways_and_the_surer_one_kept() -> None:
+    whisper = FakeCodeSwitchingWhisper(
+        {"en": ("Lowly, please.", -0.79), "ar": ("لوح لي Please", -0.47)}, [("en", 0.94), ("ar", 0.03)])
+    transcript = Transcriber(whisper, languages=("en", "ar")).transcribe(np.zeros(16, dtype=np.float32))
+    assert transcript.text == "لوح لي Please" and transcript.language == "ar"
+    assert sorted(whisper.languages_tried) == ["ar", "en"]
+
+
+def test_a_sentence_in_one_language_is_written_down_once() -> None:
+    whisper = FakeCodeSwitchingWhisper({"en": ("And what about France?", -0.2), "ar": ("", -1.0)},
+                                       [("en", 0.985), ("ar", 0.0004)])
+    transcript = Transcriber(whisper, languages=("en", "ar")).transcribe(np.zeros(16, dtype=np.float32))
+    assert transcript.text == "And what about France?" and whisper.languages_tried == ["en"]

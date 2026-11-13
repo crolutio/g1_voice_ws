@@ -173,3 +173,16 @@ def test_silence_is_trimmed_and_speech_sped_up_before_playing() -> None:
     SpeechPipeline(PaddedEngine(), player, speaking_rate=1.25).speak("One sentence here.")
     played_s = player.played[0] / rate
     assert 0.75 < played_s < 0.95  # 2 s with silence -> about 1.17 s trimmed -> about 0.94 s at 1.25x
+
+
+def test_an_arabic_reply_is_split_into_sentences_too() -> None:
+    reply = "هذه تفاحة حمراء جميلة في يدك اليمنى. هل تريد أن تعرف المزيد عنها؟ يمكنني أن أخبرك عن فوائدها."
+    chunks = spoken_chunks(reply, min_chars=10)
+    assert chunks[0] == "هذه تفاحة حمراء جميلة في يدك اليمنى."
+    assert len(chunks) == 3
+
+
+def test_a_long_arabic_sentence_is_split_at_an_arabic_comma() -> None:
+    sentence = "نحن في معرض جيتكس في دبي، وهو من أكبر معارض التكنولوجيا في العالم ويزوره الكثير من الناس كل عام"
+    chunks = spoken_chunks(sentence)
+    assert chunks[0] == "نحن في معرض جيتكس في دبي،"

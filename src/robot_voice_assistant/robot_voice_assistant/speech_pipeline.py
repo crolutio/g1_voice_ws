@@ -11,7 +11,7 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -19,6 +19,10 @@ import numpy as np
 
 from robot_voice_assistant.audio_effects import change_speed, trim_silence
 from robot_voice_assistant.conversation import split_sentences
+from robot_voice_assistant.language import ENGLISH, language_of
+
+# Said by the local voice, which speaks no Arabic, when an Arabic reply cannot reach NVIDIA's voice
+NO_ARABIC_VOICE_APOLOGY = "Sorry, my Arabic voice is not available right now."
 
 
 class SpeechEngine(Protocol):
@@ -99,7 +103,11 @@ RIVA_MAGPIE_FUNCTION_ID = "877104f7-e885-42b9-8de8-f6e4c6303969"
 
 
 class RivaSpeechEngine:
-    """NVIDIA Riva voices (Magpie TTS) in NVIDIA's cloud; the API key comes from NVIDIA_API_KEY."""
+    """NVIDIA Riva voices (Magpie TTS) in NVIDIA's cloud; the API key comes from NVIDIA_API_KEY.
+
+    ``voices`` maps a language ("en", "ar") to its (voice, language code): each piece of a reply is spoken with
+    the voice of its own language. Text in a language without an entry uses ``voice`` and ``language``.
+    """
 
     def __init__(
         self,
@@ -111,6 +119,7 @@ class RivaSpeechEngine:
         function_id: str = RIVA_MAGPIE_FUNCTION_ID,
         timeout_s: float = 8.0,
         service: object | None = None,
+        voices: Mapping[str, tuple[str, str]] | None = None,
     ) -> None:
         """``service`` replaces the gRPC connection (for tests)."""
         if service is None:
@@ -124,16 +133,18 @@ class RivaSpeechEngine:
             service = riva.client.SpeechSynthesisService(auth)
         self._service = service
         self._voice, self._language = voice, language
+        self._voices = dict(voices or {})
         self._timeout_s = timeout_s
         self.sample_rate = sample_rate
 
     def synthesize(self, text: str) -> np.ndarray:
         result: dict[str, object] = {}
+        voice, language = self._voices.get(language_of(text), (self._voice, self._language))
 
         def call() -> None:
             try:
                 result["response"] = self._service.synthesize(  # type: ignore[attr-defined]
-                    text, voice_name=self._voice, language_code=self._language, sample_rate_hz=self.sample_rate
+                    text, voice_name=voice, language_code=language, sample_rate_hz=self.sample_rate
                 )
             except Exception as error:
                 result["error"] = error
@@ -153,6 +164,10 @@ class FallbackSpeechEngine:
 
     The fallback's audio is resampled to the primary's sample rate and sped up by ``fallback_speed``, so
     the pipeline can treat both the same. After a failure the primary is skipped for ``cooldown_s``.
+
+    Text in a language the fallback cannot speak (``fallback_languages``) always asks the primary; when that
+    fails, the fallback apologises once (``NO_ARABIC_VOICE_APOLOGY``) and such pieces stay silent for
+    ``cooldown_s``, rather than being read out in the wrong accent.
     """
 
     def __init__(
@@ -163,8 +178,11 @@ class FallbackSpeechEngine:
         cooldown_s: float = 30.0,
         on_fallback: Callable[[str], None] = lambda message: None,
         clock: Callable[[], float] = time.monotonic,
+        fallback_languages: Sequence[str] = (ENGLISH,),
     ) -> None:
         self._primary, self._fallback = primary, fallback
+        self._fallback_languages = tuple(fallback_languages)
+        self._apologised_until = float("-inf")
         self._fallback_speed = fallback_speed
         self._cooldown_s = cooldown_s
         self._on_fallback = on_fallback
@@ -173,12 +191,25 @@ class FallbackSpeechEngine:
         self.sample_rate = primary.sample_rate
 
     def synthesize(self, text: str) -> np.ndarray:
-        if self._clock() >= self._skip_primary_until:
+        fallback_speaks_it = language_of(text) in self._fallback_languages
+        primary_resting = self._clock() < self._skip_primary_until
+        if not primary_resting or not fallback_speaks_it:
             try:
-                return self._primary.synthesize(text)
+                audio = self._primary.synthesize(text)
+                self._skip_primary_until = float("-inf")
+                return audio
             except Exception as error:
                 self._skip_primary_until = self._clock() + self._cooldown_s
-                self._on_fallback(f"{type(error).__name__}: {error}")
+                if not primary_resting:
+                    self._on_fallback(f"{type(error).__name__}: {error}")
+        if fallback_speaks_it:
+            return self._speak_with_fallback(text)
+        if self._clock() < self._apologised_until:
+            return np.zeros(0, dtype=np.int16)
+        self._apologised_until = self._clock() + self._cooldown_s
+        return self._speak_with_fallback(NO_ARABIC_VOICE_APOLOGY)
+
+    def _speak_with_fallback(self, text: str) -> np.ndarray:
         audio = self._fallback.synthesize(text)
         audio = change_speed(trim_silence(audio, self._fallback.sample_rate), self._fallback.sample_rate,
                              self._fallback_speed)
@@ -200,8 +231,9 @@ class AplayPlayer:
         )
 
 
-# A natural place to pause inside a sentence: after a comma, semicolon or colon, or before a joining word
-_CLAUSE_BREAK = re.compile(r"(?<=[,;:])\s+|\s+(?=(?:and|but|so|because|which|that|who|where|while|using)\s)")
+# A natural place to pause inside a sentence: after a comma, semicolon or colon (Arabic ones too), or before a
+# joining word
+_CLAUSE_BREAK = re.compile(r"(?<=[,;:\u060c\u061b])\s+|\s+(?=(?:and|but|so|because|which|that|who|where|while|using)\s)")
 
 
 def _split_at_clauses(sentence: str, first_limit: int, limit: int, min_piece: int = 20) -> list[str]:

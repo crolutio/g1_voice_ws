@@ -40,7 +40,7 @@ class SttNode(Node):
         self.declare_parameter("model_size", "small.en")
         self.declare_parameter("device", "cuda")
         self.declare_parameter("compute_type", "float16")
-        self.declare_parameter("language", "en")
+        self.declare_parameter("languages", ["en"])  # what people may speak; ["en", "ar"]: English and Arabic
         self.declare_parameter("mic_device", "default")
         # Program that records the microphone; it gets arecord's arguments (scripts/fake_microphone.py for tests)
         self.declare_parameter("recorder", "arecord")
@@ -71,7 +71,7 @@ class SttNode(Node):
         model = WhisperModel(model_size, device=device, compute_type=str(self.get_parameter("compute_type").value))
         self._transcriber = Transcriber(
             model,
-            language=str(self.get_parameter("language").value),
+            languages=[str(language) for language in self.get_parameter("languages").value],
             beam_size=int(self.get_parameter("beam_size").value),
             vocabulary=[str(word) for word in self.get_parameter("vocabulary").value if str(word).strip()],
         )
@@ -182,7 +182,7 @@ class SttNode(Node):
                 continue
             wait_s = self._segmenter.end_silence_s
             self.get_logger().info(
-                f"Heard: {request} ({len(utterance) / SAMPLE_RATE:.1f} s of speech; "
+                f"Heard ({transcript.language}): {request} ({len(utterance) / SAMPLE_RATE:.1f} s of speech; "
                 f"waited {wait_s:.2f} s for silence, speech to text {transcript.seconds:.2f} s)"
             )
             self._speech_ended_pub.publish(Float64(data=ended_at - wait_s))

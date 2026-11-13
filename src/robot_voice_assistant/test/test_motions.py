@@ -156,3 +156,12 @@ def test_a_turn_on_the_spot_holds_its_place_against_drift() -> None:
         t += dt
     assert controller.finished
     assert math.hypot(pose.x, pose.y) < 0.1  # without holding its place it would be about 0.6 m away
+
+
+def test_an_arabic_stop_request_is_recognised_without_the_language_model() -> None:
+    from robot_voice_assistant.motions import is_stop_request
+
+    for said in ["توقف!", "قف", "يا روبوت، توقف", "توقف عن المشي", "أوقف"]:
+        assert is_stop_request(said), said
+    for said in ["لا تتوقف", "استمر في المشي", "أين موقف السيارات؟"]:  # don't stop; keep walking; where is the car park?
+        assert not is_stop_request(said), said

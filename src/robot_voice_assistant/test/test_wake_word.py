@@ -142,3 +142,53 @@ def test_greeting_a_person_starts_a_conversation_without_the_wake_word() -> None
     gate.start_conversation(now_s=10.0)  # the robot said "Hello, may I help you?" to someone walking up
     assert gate.in_conversation
     assert gate.accept("What is this?", now_s=12.0) == "What is this?"
+
+
+ARABIC_WAKE_WORDS = ("robot", "روبوت", "الروبوت")
+
+
+def test_the_arabic_wake_word_starts_a_conversation() -> None:
+    gate = WakeWordGate(ARABIC_WAKE_WORDS)
+    assert gate.accept("يا روبوت، ماذا يوجد في يدي؟", now_s=0.0) == "ماذا يوجد في يدي؟"
+    assert gate.in_conversation
+    assert gate.accept("وما لونه؟", now_s=5.0) == "وما لونه؟"
+
+
+def test_the_wake_word_with_the_arabic_article_counts() -> None:
+    assert WakeWordGate(ARABIC_WAKE_WORDS).accept("أيها الروبوت، من أنت؟", now_s=0.0) is not None
+
+
+def test_an_arabic_goodbye_ends_the_conversation() -> None:
+    gate = WakeWordGate(ARABIC_WAKE_WORDS)
+    gate.accept("روبوت، مرحبا", now_s=0.0)
+    for goodbye in ("مع السلامة", "إلى اللقاء!", "وداعا"):
+        gate.start_conversation(now_s=1.0)
+        assert gate.accept(goodbye, now_s=2.0) is not None  # still answered
+        assert not gate.in_conversation, goodbye
+
+
+def test_the_arabic_wake_word_alone_is_greeted_in_arabic() -> None:
+    from robot_voice_assistant.wake_word import ARABIC_GREETING_FOR_BARE_WAKE_WORD
+
+    gate = WakeWordGate(ARABIC_WAKE_WORDS, wake_word_wait_s=3.0)
+    assert gate.accept("يا روبوت", now_s=0.0) is None
+    assert gate.poll(now_s=3.5) == ARABIC_GREETING_FOR_BARE_WAKE_WORD
+    assert gate.accept("Robot", now_s=10.0) is None
+    assert gate.poll(now_s=13.5) == GREETING_FOR_BARE_WAKE_WORD
+
+
+
+def test_whisper_s_other_arabic_spelling_of_robot_is_a_wake_word_too() -> None:
+    from robot_voice_assistant.wake_word import DEFAULT_SOUND_ALIKES
+
+    gate = WakeWordGate(ARABIC_WAKE_WORDS, sound_alikes=DEFAULT_SOUND_ALIKES)
+    assert gate.accept("يا ربوت ممكن تقولي What is the capital of Italy?", now_s=0.0) == (
+        "ممكن تقولي What is the capital of Italy?")
+
+
+def test_goodbye_in_arabic_written_in_latin_letters_ends_the_conversation() -> None:
+    for goodbye in ("Thank you. Ma'a Salama.", "maa salama", "Ma salama!"):
+        gate = _gate()
+        gate.start_conversation(now_s=0.0)
+        gate.accept(goodbye, now_s=1.0)
+        assert not gate.in_conversation, goodbye

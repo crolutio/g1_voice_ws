@@ -235,3 +235,29 @@ def test_the_local_model_can_be_left_out() -> None:
     assert not backend.has_fallback and "no local model" in description
     backend, _ = create_backend(BrainSettings(use_local_fallback=False), {})  # no Groq key: the local model is all
     assert backend.has_fallback
+
+
+ARABIC_MESSAGES: list[ChatMessage] = [{"role": "system", "content": "Answer in JSON."},
+                                      {"role": "user", "content": 'The person says: "لوح لي بيدك من فضلك"'}]
+
+
+def test_arabic_waits_for_groq_instead_of_the_local_model_which_writes_broken_arabic() -> None:
+    groq = FakeBackend("groq", [RateLimitedError(8.0), '{"reply": "حسنا!"}'])
+    llama = FakeBackend("llama", [])
+    slept: list[float] = []
+    backend = FallbackBackend(groq, llama, sleep=slept.append)
+    assert backend.chat(ARABIC_MESSAGES, SCHEMA) == '{"reply": "حسنا!"}'
+    assert slept == [8.0] and llama.calls == 0 and backend.last_used == "groq"
+
+
+def test_english_still_uses_the_local_model_when_groq_is_rate_limited() -> None:
+    groq, llama = FakeBackend("groq", [RateLimitedError(8.0)]), FakeBackend("llama", ['{"reply": "Hi"}'])
+    backend = FallbackBackend(groq, llama, sleep=lambda _s: None)
+    assert backend.chat(MESSAGES, SCHEMA) == '{"reply": "Hi"}' and backend.last_used == "llama"
+
+
+def test_a_one_word_arabic_request_also_waits_for_groq() -> None:
+    groq, llama = FakeBackend("groq", [RateLimitedError(2.0), '{"reply": "حسنا"}']), FakeBackend("llama", [])
+    backend = FallbackBackend(groq, llama, sleep=lambda _s: None)
+    backend.chat([{"role": "user", "content": 'The person says: "توقف"'}], SCHEMA)
+    assert llama.calls == 0

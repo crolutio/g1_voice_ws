@@ -18,9 +18,15 @@ _HALLUCINATIONS = frozenset(
         "uh",
         "um",
         "hmm",
+        # Arabic: "thank you", "subscribe to the channel", "thanks for watching", a subtitler's credit
+        "شكرا",
+        "اشتركوا في القناة",
+        "شكرا للمشاهدة",
+        "شكرا على المشاهدة",
+        "ترجمة نانسي قنقر",
     }
 )
-_NON_WORD = re.compile(r"[^a-z0-9' ]+")
+_NON_WORD = re.compile(r"[^\w' ]+")  # keeps the letters of every language (Arabic too)
 
 
 def normalize(text: str) -> str:

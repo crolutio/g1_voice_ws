@@ -4,7 +4,7 @@ Start the assistant with the fake microphone (see "Test whole conversations" in 
 
     python check_conversation_live.py --spool /tmp/robot_mic
 
-Every sentence is spoken by Qwen3-TTS and played into stt_node like a microphone would hear it. The script
+Every sentence is spoken by Qwen3-TTS (Arabic ones by an NVIDIA Riva voice, which needs NVIDIA_API_KEY) and played into stt_node like a microphone would hear it. The script
 waits for the robot to finish each reply, like a person, and checks what was heard, the reply, the gesture,
 the walking motion and whether the conversation is still on.
 """
@@ -23,6 +23,7 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from robot_voice_assistant.language import language_of  # noqa: E402
 
 SAMPLE_RATE = 16000
 CACHE = os.path.expanduser("~/g1_voice_ws/log/stt_check/conversations.npz")
@@ -37,6 +38,9 @@ class Step:
     gesture_prefix: str | None = None
     in_conversation_after: bool = True
     pause_s: float = 0.0
+    reply_language: str | None = None  # "en" or "ar": the language the reply must be in
+    voice: str | None = None  # another voice than the scenario's, e.g. for an English sentence in an Arabic one
+    piece_voices: tuple[str, ...] = ()  # a voice per piece, for one sentence that mixes English and Arabic
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,8 @@ class Scenario:
     loudness: float
     steps: tuple[Step, ...]
 
+
+MIXED_ARABIC, MIXED_ENGLISH = "riva:Magpie-Multilingual.AR-XA.Sofia", "aiden"
 
 SCENARIOS = {
     "quiet room, voice ryan": Scenario("ryan", 0.5, (
@@ -73,6 +79,48 @@ SCENARIOS = {
         Step(("Keep walking.",), motion="keep_walking"),
         Step(("Stop.",), motion="stop"),
         Step(("Go to sleep.",), in_conversation_after=False),
+    )),
+    # "riva:<voice>": spoken by NVIDIA Riva (Qwen3-TTS speaks no Arabic)
+    "arabic, voice sofia": Scenario("riva:Magpie-Multilingual.AR-XA.Sofia", 0.5, (
+        # Robot, what is the capital of France?
+        Step(("يا روبوت، ما هي عاصمة فرنسا؟",), reply_mentions=("باريس",), reply_language="ar"),
+        # And what is the tallest building in Dubai?
+        Step(("وما هو أطول مبنى في دبي؟",), reply_mentions=("خليفة",), reply_language="ar"),
+        # Walk forward please.
+        Step(("امش إلى الأمام من فضلك.",), motion="walk_forward", reply_language="ar"),
+        # Stop!
+        Step(("توقف!",), motion="stop", reply_language="ar"),
+        # Wave at me please.
+        Step(("لوح لي بيدك من فضلك.",), gesture_prefix="wave", reply_language="ar"),
+        # the visitor switches to English
+        Step(("And what is the capital of Japan?",), reply_mentions=("tokyo",), reply_language="en", voice="aiden"),
+        # Goodbye.
+        Step(("مع السلامة.",), in_conversation_after=False, reply_language="ar"),
+        # How are you? (not answered: the conversation is over)
+        Step(("كيف حالك؟",), answered=False, in_conversation_after=False),
+    )),
+    # One sentence, two languages (as many people speak in Dubai): Arabic pieces by NVIDIA Riva, English by Qwen3-TTS.
+    # The answer may come in either language; what counts is that it is right.
+    "mixed english and arabic": Scenario("riva:Magpie-Multilingual.AR-XA.Sofia", 0.5, (
+        # "O robot, can you tell me" what is the capital of Italy?
+        Step(("يا روبوت، ممكن تقولي", "what is the capital of Italy?"), reply_mentions=("روما", "rome"),
+             piece_voices=(MIXED_ARABIC, MIXED_ENGLISH), pause_s=0.1),
+        # "I want to know" where is Aideology based?
+        Step(("أبغى أعرف", "where is Aideology based?"), reply_mentions=("دبي", "dubai"),
+             piece_voices=(MIXED_ARABIC, MIXED_ENGLISH), pause_s=0.1),
+        # "Could you" walk forward "a little"?
+        Step(("ممكن", "walk forward", "شوي؟"), motion="walk_forward",
+             piece_voices=(MIXED_ARABIC, MIXED_ENGLISH, MIXED_ARABIC), pause_s=0.1),
+        # Okay, "stop"!
+        Step(("Okay,", "توقف!"), motion="stop", piece_voices=(MIXED_ENGLISH, MIXED_ARABIC), pause_s=0.1),
+        # What is "the tallest building in the world?"
+        Step(("What is", "أطول مبنى في العالم؟"), reply_mentions=("خليفة", "khalifa"),
+             piece_voices=(MIXED_ENGLISH, MIXED_ARABIC), pause_s=0.1),
+        # "Wave at me" please
+        Step(("لوح لي", "please"), gesture_prefix="wave", piece_voices=(MIXED_ARABIC, MIXED_ENGLISH), pause_s=0.1),
+        # Thank you, "goodbye"
+        Step(("Thank you,", "مع السلامة"), in_conversation_after=False,
+             piece_voices=(MIXED_ENGLISH, MIXED_ARABIC), pause_s=0.1),
     )),
 }
 
@@ -122,27 +170,44 @@ def spoken(engine: object, text: str, seed: int) -> np.ndarray:
     return np.interp(positions, np.arange(len(speech)), speech).astype(np.float32)
 
 
+def speaking_engine(voice: str) -> object:
+    """Qwen3-TTS with one of its speakers, or "riva:<voice>" for an NVIDIA Riva voice."""
+    if voice.startswith("riva:"):
+        from robot_voice_assistant.speech_pipeline import RivaSpeechEngine
+
+        name = voice.removeprefix("riva:")
+        code, region = name.split(".")[1].split("-")  # "Magpie-Multilingual.AR-XA.Sofia" -> "ar-XA"
+        return RivaSpeechEngine(os.environ["NVIDIA_API_KEY"], voice=name, language=f"{code.lower()}-{region}")
+    from robot_voice_assistant.speech_pipeline import Qwen3SpeechEngine
+
+    return Qwen3SpeechEngine(speaker=voice)
+
+
 def prepared_audio() -> dict[str, np.ndarray]:
     """Every spoken step, generated once (on the GPU) and cached, so the test itself needs no GPU."""
     keys = {f"{name}|{number}": (scenario, step, number)
             for name, scenario in SCENARIOS.items() for number, step in enumerate(scenario.steps, 1)}
-    if os.path.exists(CACHE):
-        cached = dict(np.load(CACHE))
-        if set(keys) <= set(cached):
-            return cached
-    from robot_voice_assistant.speech_pipeline import Qwen3SpeechEngine
+    audio: dict[str, np.ndarray] = dict(np.load(CACHE)) if os.path.exists(CACHE) else {}
+    missing = {key: value for key, value in keys.items() if key not in audio}
+    if not missing:
+        return audio
+    def voice_of(scenario: Scenario, step: Step, index: int) -> str:
+        return step.piece_voices[index] if step.piece_voices else step.voice or scenario.voice
 
-    audio: dict[str, np.ndarray] = {}
-    for voice in sorted({scenario.voice for scenario in SCENARIOS.values()}):
-        engine = Qwen3SpeechEngine(speaker=voice)
-        for key, (scenario, step, number) in keys.items():
-            if scenario.voice != voice:
-                continue
-            pieces = [spoken(engine, piece, seed=number * 10 + index) for index, piece in enumerate(step.said)]
-            silence = np.zeros(int(step.pause_s * SAMPLE_RATE), dtype=np.float32)
-            joined = np.concatenate([part for piece in pieces for part in (piece, silence)][:-1])
-            audio[key] = joined / (np.abs(joined).max() + 1e-9) * scenario.loudness
+    pieces: dict[tuple[str, int], np.ndarray] = {}
+    for voice in sorted({voice_of(scenario, step, index) for scenario, step, _ in missing.values()
+                         for index in range(len(step.said))}):
+        engine = speaking_engine(voice)
+        for key, (scenario, step, number) in missing.items():
+            for index, piece in enumerate(step.said):
+                if voice_of(scenario, step, index) == voice:
+                    speech = spoken(engine, piece, seed=number * 10 + index)
+                    pieces[key, index] = speech / (np.abs(speech).max() + 1e-9)  # two voices, equally loud
         del engine
+    for key, (scenario, step, _) in missing.items():
+        silence = np.zeros(int(step.pause_s * SAMPLE_RATE), dtype=np.float32)
+        joined = np.concatenate([part for index in range(len(step.said)) for part in (pieces[key, index], silence)][:-1])
+        audio[key] = joined / (np.abs(joined).max() + 1e-9) * scenario.loudness
     os.makedirs(os.path.dirname(CACHE), exist_ok=True)
     np.savez_compressed(CACHE, **audio)
     return audio
@@ -165,6 +230,8 @@ def check(step: Step, observed: Observed, in_conversation: bool) -> list[str]:
         problems.append("conversation " + ("still on" if in_conversation else "ended"))
     if len(observed.heard) > 1:
         problems.append(f"heard as {len(observed.heard)} requests")
+    if step.reply_language and observed.replies and language_of(" ".join(observed.replies)) != step.reply_language:
+        problems.append(f"reply not in {step.reply_language}")
     return problems
 
 

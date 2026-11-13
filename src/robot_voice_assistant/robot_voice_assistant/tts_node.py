@@ -14,6 +14,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float64, String
 
+from robot_voice_assistant.language import ARABIC, ENGLISH
 from robot_voice_assistant.node_runner import run_node
 from robot_voice_assistant.speech_pipeline import (
     AplayPlayer,
@@ -38,6 +39,9 @@ class TtsNode(Node):
         self.declare_parameter("tts_engine", "riva")
         self.declare_parameter("riva_voice", "Magpie-Multilingual.EN-US.Ray")
         self.declare_parameter("riva_language", "en-US")
+        # Arabic replies are spoken with this voice (the local voices speak no Arabic)
+        self.declare_parameter("riva_voice_arabic", "Magpie-Multilingual.AR-XA.Ray")
+        self.declare_parameter("riva_language_arabic", "ar-XA")
         self.declare_parameter("riva_sample_rate", 44100)
         self.declare_parameter("riva_speaking_rate", 0.9)  # Riva voices speak fast (about 200 words/min)
         self.declare_parameter("qwen_model", "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
@@ -77,11 +81,15 @@ class TtsNode(Node):
                 self.get_logger().warn("NVIDIA_API_KEY is not set, so the Riva voice is off; using Qwen3-TTS.")
             else:
                 riva_voice = str(self.get_parameter("riva_voice").value)
+                riva_language = str(self.get_parameter("riva_language").value)
+                arabic_voice = str(self.get_parameter("riva_voice_arabic").value)
                 riva = RivaSpeechEngine(
                     api_key,
                     voice=riva_voice,
-                    language=str(self.get_parameter("riva_language").value),
+                    language=riva_language,
                     sample_rate=int(self.get_parameter("riva_sample_rate").value),
+                    voices={ENGLISH: (riva_voice, riva_language),
+                            ARABIC: (arabic_voice, str(self.get_parameter("riva_language_arabic").value))},
                 )
                 riva_rate = float(self.get_parameter("riva_speaking_rate").value)
                 local, _ = self._load_local_engine("qwen3", qwen_rate, ready_label="Fallback voice ready")
@@ -94,7 +102,8 @@ class TtsNode(Node):
                     ),
                 )
                 self._warm_up(riva)
-                self.get_logger().info(f"TTS ready (NVIDIA Riva, voice {riva_voice}; local Qwen3-TTS if unreachable).")
+                self.get_logger().info(f"TTS ready (NVIDIA Riva, voices {riva_voice} and {arabic_voice}; "
+                                       "local Qwen3-TTS, English only, if unreachable).")
                 return engine, riva_rate
         return self._load_local_engine("qwen3" if choice == "riva" else choice, qwen_rate)
 

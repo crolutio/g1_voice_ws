@@ -8,6 +8,7 @@ from typing import Protocol
 
 import requests
 
+from robot_voice_assistant.language import ARABIC, ENGLISH, has_arabic
 from robot_voice_assistant.ollama_client import ChatMessage
 from robot_voice_assistant.token_usage import TokenUsage, groq_usage
 
@@ -76,7 +77,11 @@ MAX_WAIT_FOR_PRIMARY_S = 20.0
 
 class FallbackBackend:
     """Use the primary backend; when it fails, answer with the fallback and skip the primary for a while. Without a
-    fallback, wait for the primary when it is rate-limited for a short time."""
+    fallback, wait for the primary when it is rate-limited for a short time.
+
+    The fallback (llama3.1:8b) writes broken Arabic, so a question in a language it does not speak well
+    (not in ``fallback_languages``) waits for the primary in the same way.
+    """
 
     def __init__(
         self,
@@ -88,8 +93,10 @@ class FallbackBackend:
         clock: Callable[[], float] = time.monotonic,
         max_wait_s: float = MAX_WAIT_FOR_PRIMARY_S,
         sleep: Callable[[float], None] = time.sleep,
+        fallback_languages: Sequence[str] = (ENGLISH,),
     ) -> None:
         self._primary = primary
+        self._fallback_languages = tuple(fallback_languages)
         self._fallback = fallback
         self._names = (primary_name, fallback_name)
         self._cooldown_s = cooldown_s
@@ -101,7 +108,7 @@ class FallbackBackend:
         self.last_usage: TokenUsage | None = None  # of the model that gave the last answer
 
     def chat(self, messages: Sequence[ChatMessage], response_schema: dict[str, object]) -> str:
-        if self._fallback is None:
+        if self._fallback is None or (self._primary is not None and not self._fallback_speaks(messages)):
             return self._primary_only(messages, response_schema)
         if self._primary is not None and self._clock() >= self._primary_blocked_until:
             try:
@@ -117,6 +124,12 @@ class FallbackBackend:
         self.last_used = self._names[1]
         self.last_usage = getattr(self._fallback, "last_usage", None)
         return answer
+
+    def _fallback_speaks(self, messages: Sequence[ChatMessage]) -> bool:
+        """Whether the fallback can answer the last question. Only its first line is what the person said (in
+        English quotes, which would outvote a one-word Arabic request such as "توقف"); notes may follow it."""
+        asked = next((message["content"] for message in reversed(messages) if message["role"] == "user"), "")
+        return ARABIC in self._fallback_languages or not has_arabic(asked.split("\n", 1)[0])
 
     @property
     def has_fallback(self) -> bool:
