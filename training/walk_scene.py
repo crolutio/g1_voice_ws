@@ -331,7 +331,7 @@ def main() -> None:
                         visit_state, visit_state_time = state, sim_time
                 if sim_time - last_image_time >= camera.cfg.update_period:
                     mark = time.monotonic()
-                    bridge.publish_image(sim_time, camera.data.output["rgb"].torch[0, ..., :3].cpu().numpy())
+                    bridge.publish_image_in_background(sim_time, camera.data.output["rgb"].torch[0, ..., :3].cpu().numpy())
                     last_image_time = sim_time
                     timings["camera image"] += time.monotonic() - mark
             if time.monotonic() - report_wall >= 5.0:

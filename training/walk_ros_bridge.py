@@ -100,6 +100,19 @@ class WalkRosBridge:
             requests, self._show_requests = self._show_requests, []
         return requests
 
+    def publish_image_in_background(self, sim_time_s: float, rgb) -> bool:
+        """publish_image on a worker thread, so the simulation does not wait for the ~1 MB copy and serialisation.
+        Returns False (the image is dropped) while the previous one is still being sent."""
+        import concurrent.futures
+
+        if getattr(self, "_image_worker", None) is None:
+            self._image_worker = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="camera-publish")
+            self._image_job = None
+        if self._image_job is not None and not self._image_job.done():
+            return False
+        self._image_job = self._image_worker.submit(self.publish_image, sim_time_s, rgb)
+        return True
+
     def publish_image(self, sim_time_s: float, rgb) -> None:
         """Publish a head camera image (H x W x 3 uint8 array) as sensor_msgs/Image (rgb8)."""
         msg = Image()
@@ -157,5 +170,7 @@ class WalkRosBridge:
         self._odom_pub.publish(odom)
 
     def shutdown(self) -> None:
+        if getattr(self, "_image_worker", None) is not None:
+            self._image_worker.shutdown(wait=True)  # the last image is sent before the node goes
         self._node.destroy_node()
         rclpy.try_shutdown()
