@@ -107,6 +107,10 @@ def main() -> None:
 
     viewer = "none" if own_args.headless else own_args.viewer
     argv = ["--task", TASK, "--num_envs", "1", "--viz", viewer, *launcher_args]
+    if not any(arg.startswith("--device") for arg in launcher_args):
+        # one robot: PhysX on the CPU takes ~7 ms per step, on the GPU ~36 ms (tiny GPU jobs cost more to launch
+        # than they compute); pass --device cuda:0 for the GPU
+        argv += ["--device", "cpu"]
     args_cli = _parse_args([*argv, "physics=isaacsim_physx"])
     if own_args.surroundings or own_args.gitex:
         args_cli.enable_cameras = True  # the head camera needs rendering, also without a window
@@ -183,12 +187,29 @@ def main() -> None:
             camera = base_env.scene.sensors["head_camera"]
             last_image_time = -1.0
 
+        for visualizer in base_env.sim.visualizers:  # the window must not wait for the screen's refresh (vsync):
+            window = getattr(visualizer, "_viewer", None)  # the whole sim loop would wait with it, up to 16.7 ms
+            if window is not None and hasattr(window, "vsync"):
+                window.vsync = False
         step_dt = base_env.step_dt
         sim_time = 0.0
         visit_state, visit_state_time = "", 0.0
         obs = env.get_observations()
         report_wall, report_sim = time.monotonic(), 0.0
         timings: dict[str, float] = collections.defaultdict(float)
+        if PROFILE:  # the foot planner + IK run inside env.step: time them on their own
+            def timed(name, function):
+                def wrapper(*args, **kwargs):
+                    mark = time.monotonic()
+                    try:
+                        return function(*args, **kwargs)
+                    finally:
+                        timings[name] += time.monotonic() - mark
+                return wrapper
+
+            walk_term.process_actions = timed("(in env step) planner and IK", walk_term.process_actions)
+            base_env.sim.step = timed("(in env step) physics", base_env.sim.step)
+            base_env.sim.render = timed("(in env step) render", base_env.sim.render)
         step_count = 0
         steps_per_render = max(1, env_cfg.sim.render_interval // env_cfg.decimation)
         print("[walk_scene] Walking. Listening on /cmd_vel and /robot/joint_command.", flush=True)
@@ -243,6 +264,7 @@ def main() -> None:
                 base_env.sim.update_visualizers(step_dt * VIEWER_EVERY, skip_app_pumping=True)
                 timings["newton viewer"] += time.monotonic() - mark
 
+            mark = time.monotonic()
             data = robot.data
             bridge.publish(
                 sim_time,
@@ -253,6 +275,7 @@ def main() -> None:
                 data.root_lin_vel_b.torch[0].tolist(),
                 data.root_ang_vel_b.torch[0].tolist(),
             )
+            timings["ros publish"] += time.monotonic() - mark
             if surroundings is not None:
                 surroundings.step(step_dt)
                 requests = bridge.show_requests()
@@ -268,7 +291,11 @@ def main() -> None:
                     mark = time.monotonic()
                     hall.step(step_dt, shown_changed=bool(requests), stage=render_next, viewer=viewer_now)
                     people = hall.people_xy()
+                    timings["hall (visitors)"] += time.monotonic() - mark
+                    mark = time.monotonic()
                     bodies.update(people)  # solid, where they are drawn
+                    timings["visitor bodies"] += time.monotonic() - mark
+                    mark = time.monotonic()
                     if sim_time - people_time >= 0.1:  # the range sensor, 10 times a second
                         robot_xy = tuple(robot.data.root_pos_w.torch[0, :2].tolist())
                         bridge.publish_people(robot_frame(people, robot_xy, yaw))
@@ -294,6 +321,7 @@ def main() -> None:
                 timings.clear()
                 report_wall, report_sim = time.monotonic(), sim_time
             # Run no faster than real time, so speeds and gestures look natural.
+            timings["whole step"] += time.monotonic() - started
             time.sleep(max(0.0, step_dt - (time.monotonic() - started)))
 
 

@@ -22,6 +22,7 @@ STANDING = {"hip_pitch": -0.25, "knee": 0.5, "ankle_pitch": -0.25}
 WALKING_RANGE = {"hip_pitch": (-1.4, 0.7), "hip_roll": (-0.5, 0.5), "hip_yaw": (-0.6, 0.6), "knee": (-0.2, 2.0),
                  "ankle_pitch": (-0.9, 0.6), "ankle_roll": (-0.3, 0.3)}
 MAX_JOINT_STEP_RAD = 0.15  # per solve (one 20 ms control step): 7.5 rad/s
+CONVERGED_ERROR = 1e-5  # m and rad: IK on the CPU stops iterating once the foot is this close to its target
 REACH_FRACTION = 1.0  # targets beyond the farthest reachable point are pulled in to it
 
 
@@ -163,9 +164,15 @@ class LegKinematics:
             target_position = hip + offset * (distance.clamp(max=self.reach) / distance)  # pulled in to the reach
             angles = torch.clamp(angles, lower, upper)
         identity = torch.eye(6, device=angles.device)
+        # On the CPU (one robot, live scene) stop as soon as every foot is on target: warm-started from the last
+        # step, that is usually after 1-2 iterations. On the GPU (training) the check would stall the GPU every
+        # iteration, so the fixed number of iterations is kept there.
+        early_exit = angles.device.type == "cpu"
         for _ in range(iterations):
             position, rotation, axes, points = self._forward(angles)
             error = torch.cat([target_position - position, rotation_error(rotation, target_rotation)], dim=1)
+            if early_exit and float(error.abs().max()) < CONVERGED_ERROR:
+                break
             linear = torch.cross(axes, position.unsqueeze(1) - points, dim=-1)  # (N, 6, 3)
             jacobian = torch.cat([linear, axes], dim=-1).transpose(1, 2)  # (N, 6 task, 6 joints)
             step = jacobian.transpose(1, 2) @ torch.linalg.solve(

@@ -59,15 +59,27 @@ def configure_people_bodies(env_cfg, count: int) -> None:
 
 
 class PeopleBodies:
-    """Moves the capsules to where the people are (call every physics step)."""
+    """Moves the capsules to where the people are (call every physics step).
+
+    Only capsules that moved are written to the physics: parked people, and people standing still, cost nothing."""
+
+    MOVE_EPSILON_M = 1e-3
 
     def __init__(self, scene, count: int) -> None:
         import torch
 
         self._torch = torch
         self._bodies = [scene[f"person_body_{n}"] for n in range(count)]
+        self._last: list[tuple[float, float, float] | None] = [None] * count
+        # one pose tensor per capsule, reused every step (x, y, z, qx, qy, qz, qw)
+        self._poses = [torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]], device=body.device) for body in self._bodies]
 
     def update(self, people: Sequence[World]) -> None:
-        for body, (x, y, z) in zip(self._bodies, body_positions(people)):
-            pose = self._torch.tensor([[x, y, z, 0.0, 0.0, 0.0, 1.0]], device=body.device)  # (x, y, z, qx, qy, qz, qw)
+        for n, (body, position) in enumerate(zip(self._bodies, body_positions(people))):
+            last = self._last[n]
+            if last is not None and max(abs(a - b) for a, b in zip(position, last)) < self.MOVE_EPSILON_M:
+                continue
+            pose = self._poses[n]
+            pose[0, :3] = self._torch.tensor(position)  # one copy to the device
             body.write_root_pose_to_sim_index(root_pose=pose)
+            self._last[n] = position
