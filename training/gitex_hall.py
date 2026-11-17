@@ -45,6 +45,8 @@ BRANDS = [(0.0, 0.55, 0.6), (0.9, 0.45, 0.05), (0.15, 0.6, 0.25), (0.8, 0.12, 0.
 HELD_COLOURS = {"apple": (0.72, 0.06, 0.06), "banana": (0.95, 0.85, 0.2), "mug": (0.8, 0.12, 0.1),
                 "bottle": (0.95, 0.78, 0.08), "scissors": (0.15, 0.3, 0.8)}
 HIDDEN_Z = -50.0  # where things not in the hall wait (under the floor)
+FAR_VISITOR_M = 8.0  # visitors farther than this from the robot are small in its head camera
+FAR_POSE_EVERY = 4  # ... so their walking pose is refreshed there every 4th camera frame (their place every frame)
 SCREEN_CONTENT = [(0.15, 0.55, 0.95), (0.95, 0.35, 0.55), (0.25, 0.85, 0.65), (0.98, 0.7, 0.2)]
 OUTFITS = [  # shoes, trousers, shirt, skin
     ((0.1, 0.1, 0.1), (0.15, 0.2, 0.35), (0.9, 0.9, 0.92), (0.87, 0.68, 0.55)),
@@ -245,6 +247,10 @@ class GitexHall:
         if newton is not None and getattr(newton, "_viewer", None) is not None:
             newton._viewer.show_ui = False  # the whole hall in view; press H in the viewer for its controls
         self._textured: list[str] = []  # textured product meshes whose texturing is turned on once they exist
+        # the head camera's view of far visitors: their walking pose is refreshed in the stage only every
+        # FAR_POSE_EVERY camera frames (they are a few pixels tall there); their place is updated every frame
+        self.robot_xy: tuple[float, float] | None = None  # set by the scene before each step
+        self._stage_updates = 0
         self._viewer_indices: dict[str, object] = {}  # each mesh's triangles on the GPU, sent once (they never change)
         self._held_hidden: set[str] = set()  # held objects already hidden in the viewer (no need to send them again)
         # with the viewer in its own process, the visitors' meshes are built there: here only each visitor's place,
@@ -538,6 +544,8 @@ class GitexHall:
                 self._enable_texture(name)
         if not (stage or (viewer and self._newton is not None)):
             return
+        if stage:
+            self._stage_updates += 1
         for n, (visitor, path, texture) in enumerate(self._visitors):
             x, y, yaw, frame = visitor.pose(self._time)
             points = self._cycle.frames[frame]
@@ -545,7 +553,8 @@ class GitexHall:
                 ops = UsdGeom.Xformable(self._stage.GetPrimAtPath(path)).GetOrderedXformOps()
                 ops[0].Set(Gf.Vec3d(x, y, 0.0))
                 ops[1].Set(math.degrees(yaw))
-                if self._last_frames.get(n) != frame:
+                far = self.robot_xy is not None and math.hypot(x - self.robot_xy[0], y - self.robot_xy[1]) > FAR_VISITOR_M
+                if self._last_frames.get(n) != frame and (not far or self._stage_updates % FAR_POSE_EVERY == 0):
                     body = UsdGeom.Mesh(self._stage.GetPrimAtPath(f"{path}/model/body"))
                     body.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(points))
                     self._last_frames[n] = frame
