@@ -9,7 +9,7 @@
 ## 2. Leg IK
 
 - [x] 2.1 Add an IK equivalence test: record 2000 foot targets from a walk, solve with the old and new solver, assert max diff ≤ 1e-3 rad (CPU, N=1) and on a GPU batch of 4096
-- [x] 2.2 Precompute per-joint constants and Rodrigues terms in `LegKinematics`; verify with 2.1 and the benchmark
+- [x] 2.2 (superseded by the NumPy solver) constants precomputed in NumPy; verified with 2.1 and the benchmark
 - [x] 2.3 Add batch-wide early convergence exit to `solve`; verify with 2.1, the benchmark, and a training-throughput check (no slowdown, else limit it to the CPU plan device)
 
 ## 3. Visitors and viewer
@@ -27,7 +27,7 @@
 ## 5. Decision point and phase 2
 
 - [x] 5.1 Run the full-demo benchmark; if the median is ≥ 100%, skip 5.2–5.3
-- [x] 5.2 (only if below target) Run planner + IK as one fused Warp kernel or a captured CUDA Graph on the GPU; verify with 2.1 (CPU and GPU batch) and the benchmark
+- [x] 5.2 (done differently) planner + IK in NumPy on the CPU instead of a fused GPU kernel: one robot is faster on the CPU; verified with test_ik_equivalence.py and test_planner_equivalence.py
 - [x] 5.3 (only if still below target) Move the Newton viewer to its own process fed by shared memory; verify the same picture and the new benchmark numbers
 
 ## 6. Verification
