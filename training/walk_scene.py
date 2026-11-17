@@ -103,9 +103,18 @@ def main() -> None:
     parser.add_argument("--visitors", type=int, default=10, help="with --gitex: how many visitors walk the hall")
     parser.add_argument("--people", type=int, default=2, help="with --surroundings: how many people walk past")
     parser.add_argument("--no-follow", action="store_true", help="do not move the camera with the robot")
+    parser.add_argument("--viewer-in-process", action="store_true",
+                        help="with --gitex: draw the Newton viewer in the simulation's own process (slower; by default "
+                             "it runs in a process of its own, viewer_process.py)")
+    parser.add_argument("--viewer-fps", type=float, default=30.0,
+                        help="with --gitex: how often the robot and visitors are sent to the viewer (per real second)")
     own_args, launcher_args = parser.parse_known_args()
 
     viewer = "none" if own_args.headless else own_args.viewer
+    # the GITEX hall's Newton window runs in its own process (viewer_process.py), on its own CPU core
+    remote_viewer = own_args.gitex and viewer == "newton_gl" and not own_args.viewer_in_process
+    if remote_viewer:
+        viewer = "none"
     argv = ["--task", TASK, "--num_envs", "1", "--viz", viewer, *launcher_args]
     if not any(arg.startswith("--device") for arg in launcher_args):
         # one robot: PhysX on the CPU takes ~7 ms per step, on the GPU ~36 ms (tiny GPU jobs cost more to launch
@@ -169,6 +178,11 @@ def main() -> None:
 
             origin = base_env.scene.env_origins[0, :2].tolist()
             newton = next((v for v in base_env.sim.visualizers if hasattr(v, "log_mesh")), None)
+            if remote_viewer:
+                from viewer_process import RemoteViewer
+
+                newton = RemoteViewer(list(robot.body_names), *NEWTON_VIEWS[own_args.view])
+                cleanup.callback(newton.close)
             hall = GitexHall(base_env.sim.stage, (origin[0], origin[1]), newton=newton, visitors=own_args.visitors)
             surroundings = Surroundings(base_env.sim.stage, (origin[0], origin[1]), people=0, room=False)
             camera = base_env.scene.sensors["head_camera"]
@@ -211,6 +225,7 @@ def main() -> None:
             base_env.sim.step = timed("(in env step) physics", base_env.sim.step)
             base_env.sim.render = timed("(in env step) render", base_env.sim.render)
         step_count = 0
+        last_viewer_send = 0.0
         steps_per_render = max(1, env_cfg.sim.render_interval // env_cfg.decimation)
         print("[walk_scene] Walking. Listening on /cmd_vel and /robot/joint_command.", flush=True)
         def reset_robot() -> None:
@@ -258,8 +273,16 @@ def main() -> None:
             timings["env step"] += time.monotonic() - mark
             step_count += 1
             render_next = step_count % steps_per_render == steps_per_render - 1  # the camera renders next step
-            viewer_now = step_count % VIEWER_EVERY == 0
-            if camera is not None and viewer_now:  # rendering is sparse (render_interval): update the viewer here
+            if remote_viewer:  # send the robot and visitors at the viewer's rate, in real (wall-clock) time
+                viewer_now = newton.alive() and time.monotonic() - last_viewer_send >= 1.0 / own_args.viewer_fps
+                if viewer_now:
+                    mark = time.monotonic()
+                    newton.publish_robot(robot.data.body_pose_w.torch[0].cpu().numpy())
+                    last_viewer_send = mark
+                    timings["viewer (send)"] += time.monotonic() - mark
+            else:
+                viewer_now = step_count % VIEWER_EVERY == 0
+            if camera is not None and viewer_now and not remote_viewer:  # rendering is sparse (render_interval): update the viewer here
                 mark = time.monotonic()
                 base_env.sim.update_visualizers(step_dt * VIEWER_EVERY, skip_app_pumping=True)
                 timings["newton viewer"] += time.monotonic() - mark

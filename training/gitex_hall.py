@@ -452,6 +452,10 @@ class GitexHall:
 
     def _log(self, name: str, points: np.ndarray, indices: np.ndarray, colour, roughness=0.7, uvs=None,
              texture=None, dynamic: bool = False, normals: np.ndarray | None = None) -> None:
+        if getattr(self._newton, "accepts_numpy", False):  # the viewer in its own process (viewer_process.py)
+            self._newton.log_mesh(name, points, indices, colour, roughness, uvs=uvs, texture=texture, dynamic=dynamic,
+                                  normals=normals)
+            return
         import warp as wp
 
         # the viewer's own device (the sim may run on the CPU): mixing devices crashes Warp
