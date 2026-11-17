@@ -55,6 +55,7 @@ class RemoteViewer:
     """Drop-in for the Newton visualizer that GitexHall draws into, with the window in another process."""
 
     accepts_numpy = True  # GitexHall passes numpy arrays straight here (no GPU round trip)
+    builds_people = True  # GitexHall sends visitor poses only; their meshes are built in the viewer process
     _viewer = None  # GitexHall looks for the in-process window; there is none here
 
     def __init__(self, body_names: list[str], eye, lookat, width: int = 1600, height: int = 900,
@@ -105,6 +106,22 @@ class RemoteViewer:
                              np.asarray(indices, dtype=np.int32), tuple(colour), float(roughness)))
         values = points if normals is None else np.concatenate([points, normals], axis=1)
         slot.write(values)
+
+    def setup_people(self, shapes: np.ndarray, normals: np.ndarray, colour_groups: list, count: int,
+                     held: list) -> None:
+        """Once: the visitors' body shapes (S, V, 3) and their normals, the clothing colour groups
+        (colour, vertex ids, triangles), how many visitors, and the objects a visitor can hold
+        (name, points, indices, colour)."""
+        self._people = _Slot((count + 1, 5))  # a row per visitor (x, y, yaw, shape, visible), then the held object
+        self._queue.put(("people", self._people.shm.name, count, shapes, normals,
+                         [(tuple(c), np.asarray(v), np.asarray(i, np.int32)) for c, v, i in colour_groups],
+                         [(n, np.asarray(p, np.float32), np.asarray(i, np.int32), tuple(c)) for n, p, i, c in held]))
+        self._slots["__people__"] = self._people
+
+    def publish_people(self, rows: np.ndarray, held_row: np.ndarray) -> None:
+        self._people.data[:-1] = rows
+        self._people.data[-1] = held_row
+        self._people.seq[0] += 1
 
     def close(self) -> None:
         try:
@@ -186,6 +203,52 @@ def _run(queue, body_names, robot_shm, eye, lookat, width, height, max_fps) -> N
             texture=texture, color=colour, roughness=roughness, dynamic=dynamic, backface_culling=False,
         )
 
+    people = None
+    hidden_z = -50.0
+
+    def draw_people() -> None:
+        slot = people["slot"]
+        seq = int(slot.seq[0])
+        if seq == people["seq"]:
+            return
+        people["seq"] = seq
+        rows = slot.data.copy()
+        count, shapes, normals = people["count"], people["shapes"], people["normals"]
+        vertices = shapes.shape[1]
+        visitors = rows[:count]
+        ids = visitors[:, 3].astype(np.int64).clip(0, len(shapes) - 1)
+        c, s = np.cos(visitors[:, 2])[:, None], np.sin(visitors[:, 2])[:, None]
+        local, local_n = shapes[ids], normals[ids]  # (count, V, 3)
+        points = people["points"].reshape(count, vertices, 3)
+        turned = people["world_normals"].reshape(count, vertices, 3)
+        points[..., 0] = visitors[:, 0:1] + c * local[..., 0] - s * local[..., 1]
+        points[..., 1] = visitors[:, 1:2] + s * local[..., 0] + c * local[..., 1]
+        points[..., 2] = np.where(visitors[:, 4:5] > 0.5, local[..., 2], hidden_z)
+        turned[..., 0] = c * local_n[..., 0] - s * local_n[..., 1]
+        turned[..., 1] = s * local_n[..., 0] + c * local_n[..., 1]
+        turned[..., 2] = local_n[..., 2]
+        flat, flat_n = people["points"], people["world_normals"]
+        for number, (colour, vertex_ids, indices) in enumerate(people["groups"]):
+            log(f"/gitex/visitors_{number}", flat[vertex_ids], indices, colour, 0.8, normals=flat_n[vertex_ids],
+                dynamic=True)
+        held_row = rows[count]
+        shown = int(held_row[0])
+        for number, (name, held_points, indices, colour) in enumerate(people["held"]):
+            if number != shown and people["shown"] != number and people.get(f"logged_{number}"):
+                continue  # still hidden
+            if number == shown:
+                cx, cy, cz, yaw = (float(v) for v in held_row[1:5])
+            else:
+                cx, cy, cz, yaw = 0.0, 0.0, hidden_z, 0.0
+            hc, hs = np.cos(yaw), np.sin(yaw)
+            world = np.empty_like(held_points)
+            world[:, 0] = cx + hc * held_points[:, 0] - hs * held_points[:, 1]
+            world[:, 1] = cy + hs * held_points[:, 0] + hc * held_points[:, 1]
+            world[:, 2] = cz + held_points[:, 2]
+            log(f"/gitex/held_{name}", world, indices, colour, 0.5, dynamic=True)
+            people[f"logged_{number}"] = True
+        people["shown"] = shown
+
     started = time.monotonic()
     while viewer.is_running():
         frame_start = time.monotonic()
@@ -202,6 +265,16 @@ def _run(queue, body_names, robot_shm, eye, lookat, width, height, max_fps) -> N
                 log(name, points, indices, colour, roughness, uvs, texture)
                 if texture is not None:
                     textured.append(name)
+            elif message[0] == "people":
+                _, shm_name, count, shapes, shape_normals, groups, held = message
+                people = {"slot": _Slot((count + 1, 5), name=shm_name), "seq": -1, "count": count,
+                          "shapes": shapes, "normals": shape_normals,
+                          "groups": [(c, v, wp.array(i, dtype=wp.int32, device=device)) for c, v, i in groups],
+                          "held": [(n, p, wp.array(i, dtype=wp.int32, device=device), c) for n, p, i, c in held],
+                          "shown": -1}
+                vertices = shapes.shape[1]
+                people["points"] = np.zeros((count * vertices, 3), dtype=np.float32)
+                people["world_normals"] = np.zeros_like(people["points"])
             elif message[0] == "dynamic":
                 _, name, shm_name, count, width_, indices, colour, roughness = message
                 if name in moving:
@@ -225,6 +298,8 @@ def _run(queue, body_names, robot_shm, eye, lookat, width, height, max_fps) -> N
             log(name, values[:, :3], indices, colour, roughness,
                 normals=values[:, 3:6] if width_ == 6 else None, dynamic=True)
             moving[name] = (slot, seq, indices, width_, colour, roughness)
+        if people is not None:
+            draw_people()
         for name in textured:
             enable_texture(name)
         textured.clear()

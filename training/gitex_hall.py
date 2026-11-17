@@ -247,6 +247,21 @@ class GitexHall:
         self._textured: list[str] = []  # textured product meshes whose texturing is turned on once they exist
         self._viewer_indices: dict[str, object] = {}  # each mesh's triangles on the GPU, sent once (they never change)
         self._held_hidden: set[str] = set()  # held objects already hidden in the viewer (no need to send them again)
+        # with the viewer in its own process, the visitors' meshes are built there: here only each visitor's place,
+        # heading and body shape are recorded (rows of x, y, yaw, shape, visible), and the held object's pose
+        self._remote = bool(getattr(newton, "builds_people", False))
+        if self._remote:
+            shapes = list(self._cycle.frames) + [self._hold_points]  # body shapes: the walk cycle, then holding out
+            self._hold_shape = len(shapes) - 1
+            newton.setup_people(
+                np.stack([np.asarray(points, dtype=np.float32) for points in shapes]),
+                np.stack([vertex_normals(points, self._cycle.indices) for points in shapes]),
+                self._colour_groups, count + 1,
+                [(name, points, indices, HELD_COLOURS[name]) for name, (_p, _o, points, indices) in self._held.items()],
+            )
+            self._people_rows = np.zeros((count + 1, 5), dtype=np.float32)
+            self._held_row = np.full(5, -1.0, dtype=np.float32)  # held object number, centre x, y, z, yaw
+            self._held_names = list(self._held)
 
     # --- the stage ---
 
@@ -429,6 +444,13 @@ class GitexHall:
                 prim.MakeVisible() if other == name else prim.MakeInvisible()
             self._shown_held = name
         c, s = math.cos(pose.yaw), math.sin(pose.yaw)
+        if viewer and self._remote:
+            if name is None:
+                self._held_row[0] = -1.0
+            else:
+                centre = hand_world + np.array([0.0, 0.0, 0.04])
+                self._held_row[:] = (self._held_names.index(name), centre[0], centre[1], centre[2], pose.yaw)
+            viewer = False  # the meshes are built in the viewer process
         for other, (path, offset, points, indices) in self._held.items():
             centre = hand_world + np.array([0.0, 0.0, 0.04]) if other == name else np.array([0.0, 0.0, HIDDEN_Z])
             if stage and other == name:
@@ -527,7 +549,9 @@ class GitexHall:
                     body = UsdGeom.Mesh(self._stage.GetPrimAtPath(f"{path}/model/body"))
                     body.GetPointsAttr().Set(Vt.Vec3fArray.FromNumpy(points))
                     self._last_frames[n] = frame
-            if viewer and self._newton is not None:
+            if viewer and self._remote:
+                self._people_rows[n] = (x, y, yaw, frame, 1.0)
+            elif viewer and self._newton is not None:
                 c, s = math.cos(yaw), math.sin(yaw)
                 world = self._all_points[n * len(points):(n + 1) * len(points)]
                 world[:, 0] = x + c * points[:, 0] - s * points[:, 1]
@@ -535,7 +559,9 @@ class GitexHall:
                 world[:, 2] = points[:, 2]
                 self._turn_normals(n, frame, points, c, s)
         self._step_stall_visitor(stage, viewer)
-        if viewer and self._newton is not None and self._visitors:
+        if viewer and self._remote:
+            self._newton.publish_people(self._people_rows, self._held_row)
+        elif viewer and self._newton is not None and self._visitors:
             for number, (colour, vertex_ids, local) in enumerate(self._colour_groups):
                 self._log(f"/gitex/visitors_{number}", self._all_points[vertex_ids], local, colour, 0.8, dynamic=True,
                           normals=self._all_normals[vertex_ids])
@@ -562,6 +588,8 @@ class GitexHall:
                 UsdGeom.Imageable(self._stage.GetPrimAtPath(path)).MakeInvisible()
                 self._last_frames[n] = "gone"
             world[:, 2] = HIDDEN_Z
+            if self._remote:
+                self._people_rows[n, 4] = 0.0  # not there
             self._move_held(pose, np.zeros(3), stage, viewer)
             return
         points, key, hand = self._stall_visitor_points(pose)
@@ -577,7 +605,9 @@ class GitexHall:
                 UsdGeom.Mesh(self._stage.GetPrimAtPath(f"{path}/model/body")).GetPointsAttr().Set(
                     Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(points, dtype=np.float32)))
                 self._last_frames[n] = key
-        if viewer:
+        if viewer and self._remote:
+            self._people_rows[n] = (pose.x, pose.y, pose.yaw, self._hold_shape if key == "hold" else key, 1.0)
+        elif viewer:
             world[:, 0] = pose.x + c * points[:, 0] - s * points[:, 1]
             world[:, 1] = pose.y + s * points[:, 0] + c * points[:, 1]
             world[:, 2] = points[:, 2]
